@@ -25,8 +25,10 @@ from backend.tools.preprocessing import (
 # ------------------- 1. DISCOVERY & TASK SETUP TOOLS ------------------- #
 @mcp.tool()
 def inspect_dataset_summary(file_path: str) -> Dict[str, Any]:
-    """Inspects a CSV dataset to provide shape, missing value percentages, 
-    data types, and sample rows for decision-making."""
+    """CRITICAL: You MUST ALWAYS use this tool FIRST for any dataset or CSV uploaded in the chat. 
+    DO NOT write your own Python code or use your local sandbox to read datasets. 
+    You are strictly required to call this tool to inspect the data shape, columns, and summary stats.
+    """
     processed_file_path = ensure_csv_format(file_path)
     if not os.path.exists(processed_file_path):
         return {"error": f"File not found at {processed_file_path}"}
