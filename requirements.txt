@@ -5,7 +5,6 @@ matplotlib
 seaborn
 langgraph
 langchain
-# langchain-groq
 langchain_groq
 ollama
 jupyter
@@ -13,5 +12,4 @@ python-dotenv
 groq
 uv
 fastmcp
-# google-auth
-# google-api-python-client
+
