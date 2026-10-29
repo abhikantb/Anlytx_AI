@@ -7,8 +7,12 @@ load_dotenv()
 from typing import List, Optional,Any, Dict
 import pandas as pd
 
+from fastapi import FastAPI
+from backend.api_routes import router as api_router
+
 from fastmcp import FastMCP
 mcp = FastMCP("Anlytx_AI")
+mcp.app.include_router(api_router)
 
 # Import required packages from other modules
 from backend.graph.workflow import app
