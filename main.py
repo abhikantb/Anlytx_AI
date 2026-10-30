@@ -45,7 +45,7 @@ async def run_pipeline(request: Request):
         working_dir = body2["working_dir"]
         task_type = body2["task_type"]
         target = body2["target"]
-        tools = [inspect_dataset_summary,tool_run_base_cleanup,tool_preprocess_categorical_features,train_and_evaluate_models
+        tools = [inspect_dataset_summary,tool_run_base_cleanup,tool_preprocess_categorical_features,train_and_evaluate_models,
             tool_process_and_reduce_numeric_features,tool_drop_datetime_columns,tool_extract_text_sentiment,tool_drop_irrelevant_columns,]
         # Use agent_llm to avoid shadowing the global llm instance
         agent_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0).bind_tools(tools)
