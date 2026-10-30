@@ -7,12 +7,11 @@ load_dotenv()
 from typing import List, Optional,Any, Dict
 import pandas as pd
 
-from fastapi import FastAPI
-from backend.api_routes import router as api_router
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from fastmcp import FastMCP
 mcp = FastMCP("Anlytx_AI")
-mcp.app.include_router(api_router)
 
 # Import required packages from other modules
 from backend.graph.workflow import app
@@ -27,6 +26,26 @@ from backend.tools.preprocessing import (
 
 
 # ------------------- 1. DISCOVERY & TASK SETUP TOOLS ------------------- #
+@mcp.custom_route("/api/get-columns", methods=["POST"])
+async def get_columns(request: Request):
+    try:
+        os.makedirs("/tmp/anlytx_uploads", exist_ok=True)
+        file_path = "/tmp/anlytx_uploads/uploaded_dataset.csv"
+        # Read the stream body sent by n8n
+        body = await request.body()
+        with open(file_path, "wb") as f:
+            f.write(body)
+        task_type = request.query_params.get("task_type", "classification")
+        try:
+            df = pd.read_csv(file_path)
+        except Exception:
+            df = pd.read_excel(file_path)
+        return JSONResponse({"columns": list(df.columns),"file_path": file_path,"task_type": task_type})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+
 @mcp.tool()
 def inspect_dataset_summary(file_path: str) -> Dict[str, Any]:
     """CRITICAL: You MUST ALWAYS use this tool FIRST for any dataset or CSV uploaded in the chat. 

@@ -12,4 +12,3 @@ python-dotenv
 groq
 uv
 fastmcp
-fastapi
