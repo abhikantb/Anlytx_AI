@@ -63,17 +63,25 @@ async def run_pipeline(request: Request):
             "Inspect the dataset summary and sample rows, execute necessary preprocessing tools, and train the models."
         )
         messages = [SystemMessage(content=system_instruction), HumanMessage(content=user_prompt)]
-        tool_map = {t.name: t for t in tools}
+        tool_map = {
+            "inspect_dataset_summary": inspect_dataset_summary,
+            "tool_run_base_cleanup": tool_run_base_cleanup,
+            "tool_preprocess_categorical_features": tool_preprocess_categorical_features,
+            "tool_process_and_reduce_numeric_features": tool_process_and_reduce_numeric_features,
+            "tool_drop_datetime_columns": tool_drop_datetime_columns,
+            "tool_extract_text_sentiment": tool_extract_text_sentiment,
+            "tool_drop_irrelevant_columns": tool_drop_irrelevant_columns,
+            "train_and_evaluate_models": train_and_evaluate_models
+        }
         while True:
             response = agent_llm.invoke(messages)
             messages.append(response)
             if not response.tool_calls:
                 break
             for tool_call in response.tool_calls:
-                selected_tool = tool_map.get(tool_call["name"])
-                # Resolve underlying function if wrapped by FastMCP
-                raw_fn = getattr(selected_tool, "fn", selected_tool)
-                tool_output = raw_fn(**tool_call["args"])
+                tool_fn = tool_map.get(tool_call["name"])
+                # Execute tool directly
+                tool_output = tool_fn(**tool_call["args"])
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call["id"],
