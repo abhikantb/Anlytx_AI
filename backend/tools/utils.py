@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import io
 
 def create_working_dir(file_path: str) -> str:
     """Generates a unique project working directory under data/ and creates it."""
@@ -24,19 +25,15 @@ def save_step_output(df: pd.DataFrame, working_dir: str, filename: str = "workin
         print(f"Error saving dataset to {working_dir}/{filename}: {e}")
         raise
 
-def ensure_csv_format(file_path: str) -> str:
-    """
-    Checks if the input file is an Excel file. If so, reads it and converts it 
-    into a CSV file within the same directory, returning the new CSV file path.
-    If it's already a CSV, returns the path as-is.
-    """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found at {file_path}")
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext in ['.xlsx', '.xls']:
-        # Read Excel and save as CSV in the same location
-        df = pd.read_excel(file_path)
-        csv_path = os.path.splitext(file_path)[0] + ".csv"
-        df.to_csv(csv_path, index=False)
-        return csv_path
-    return file_path
+def process_and_save_upload(body_bytes: bytes, filename: str) -> tuple[str, list[str]]:
+    """Validates extension, converts Excel if needed, creates project dir, saves CSV, returns working_dir & columns."""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ['.csv', '.xlsx', '.xls']:
+        raise ValueError(f"Unsupported format '{ext}'. Only CSV and Excel (.xlsx, .xls) are allowed.")
+    if ext == '.csv':
+        df = pd.read_csv(io.BytesIO(body_bytes))
+    else:
+        df = pd.read_excel(io.BytesIO(body_bytes))
+    working_dir = create_working_dir(filename)
+    save_step_output(df, working_dir, "working_dataset.csv")
+    return working_dir, list(df.columns)

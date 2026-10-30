@@ -1,66 +1,101 @@
 import os
 import json
-import io
-from dotenv import load_dotenv
-load_dotenv()
-
-from typing import List, Optional,Any, Dict
-import pandas as pd
-
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+import io
+from typing import List, Optional,Any, Dict
+import pandas as pd
+from dotenv import load_dotenv
+load_dotenv()
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_groq import ChatGroq
 
 from fastmcp import FastMCP
 mcp = FastMCP("Anlytx_AI")
 
 # Import required packages from other modules
 from backend.graph.workflow import app
-from backend.tools.utils import create_working_dir,save_step_output,ensure_csv_format
-
+from backend.tools.utils import create_working_dir,save_step_output,process_and_save_upload
 from backend.tools.preprocessing import (
     run_base_preprocessing,     run_categorical_preprocessing,     run_numerical_preprocessing,
     drop_datetime_columns,     extract_text_sentiment,     drop_irrelevant_columns )
 
 
-
-
-
 # ------------------- 1. DISCOVERY & TASK SETUP TOOLS ------------------- #
-@mcp.custom_route("/api/get-columns", methods=["POST"])
-async def get_columns(request: Request):
+@mcp.custom_route("/api/processing_data", methods=["POST"])
+async def processing_data(request: Request):
     try:
-        os.makedirs("/tmp/anlytx_uploads", exist_ok=True)
-        file_path = "/tmp/anlytx_uploads/uploaded_dataset.csv"
-        # Read the stream body sent by n8n
         body = await request.body()
-        with open(file_path, "wb") as f:
-            f.write(body)
-        task_type = request.query_params.get("task_type", "classification")
-        try:
-            df = pd.read_csv(file_path)
-        except Exception:
-            df = pd.read_excel(file_path)
-        return JSONResponse({"columns": list(df.columns),"file_path": file_path,"task_type": task_type})
+        filename = request.query_params["filename"]
+        task_type = request.query_params["task_type"]
+        working_dir, columns = process_and_save_upload(body, filename)
+        return JSONResponse({
+            "status": "success",
+            "working_dir": working_dir,
+            "columns": columns,
+            "task_type": task_type
+        })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
+@mcp.custom_route("/api/run-pipeline", methods=["POST"])
+async def run_pipeline(request: Request):
+    try:
+        body2 = await request.json()
+        working_dir = body2["working_dir"]
+        task_type = body2["task_type"]
+        target = body2["target"]
+        tools = [inspect_dataset_summary,tool_run_base_cleanup,tool_preprocess_categorical_features,train_and_evaluate_models
+            tool_process_and_reduce_numeric_features,tool_drop_datetime_columns,tool_extract_text_sentiment,tool_drop_irrelevant_columns,]
+        # Use agent_llm to avoid shadowing the global llm instance
+        agent_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0).bind_tools(tools)
+        system_instruction = (
+            "You are an expert AutoML data scientist. You must:\n"
+            "1. ALWAYS call inspect_dataset_summary first using the provided working_dir.\n"
+            "2. Carefully read the sample data rows, column types, shape, and null percentages.\n"
+            "3. Decide which cleaning and preprocessing tools to call based on the observed data.\n"
+            "4. Finally, call train_and_evaluate_models to finish the training process."
+        )
+        user_prompt = (
+            f"Dataset working_dir: '{working_dir}'\n"
+            f"Task Type: '{task_type}'\n"
+            f"Target Column: '{target}'\n"
+            "Inspect the dataset summary and sample rows, execute necessary preprocessing tools, and train the models."
+        )
+        messages = [SystemMessage(content=system_instruction), HumanMessage(content=user_prompt)]
+        tool_map = {t.name: t for t in tools}
+        while True:
+            response = agent_llm.invoke(messages)
+            messages.append(response)
+            if not response.tool_calls:
+                break
+            for tool_call in response.tool_calls:
+                selected_tool = tool_map.get(tool_call["name"])
+                # Resolve underlying function if wrapped by FastMCP
+                raw_fn = getattr(selected_tool, "fn", selected_tool)
+                tool_output = raw_fn(**tool_call["args"])
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps(tool_output) if isinstance(tool_output, dict) else str(tool_output)
+                })
+        return JSONResponse({"status": "success","working_dir": working_dir,"final_summary": messages[-1].content})
+    except Exception as e:
+        return JSONResponse({"error": f"Pipeline execution failed: {str(e)}"}, status_code=500)
 
 
 @mcp.tool()
-def inspect_dataset_summary(file_path: str) -> Dict[str, Any]:
-    """CRITICAL: You MUST ALWAYS use this tool FIRST for any dataset or CSV uploaded in the chat. 
-    DO NOT write your own Python code or use your local sandbox to read datasets. 
-    You are strictly required to call this tool to inspect the data shape, columns, and summary stats.
+def inspect_dataset_summary(working_dir: str) -> Dict[str, Any]:
+    """CRITICAL: You MUST ALWAYS use this tool FIRST on the provided working_dir.
+    Inspects the dataset shape, dtypes, null percentages, and first sample rows 
+    to decide which preprocessing tools to execute.
     """
-    processed_file_path = ensure_csv_format(file_path)
-    if not os.path.exists(processed_file_path):
-        return {"error": f"File not found at {processed_file_path}"}
+    file_path = os.path.join(working_dir, "working_dataset.csv")
+    if not os.path.exists(file_path):
+        return {"error": f"Working file not found at {file_path}"}
     try:
-        working_dir = create_working_dir(processed_file_path)
-        df = pd.read_csv(processed_file_path)
-        save_step_output(df, working_dir)
+        df = pd.read_csv(file_path)
         return {
-            "file_path": processed_file_path,
             "working_dir": working_dir,
             "shape": {"rows": df.shape[0], "columns": df.shape[1]},
             "dtypes": df.dtypes.astype(str).to_dict(),
@@ -68,37 +103,8 @@ def inspect_dataset_summary(file_path: str) -> Dict[str, Any]:
             "sample_data": df.head(5).to_dict(orient="records")
         }
     except Exception as e:
-        return {"error": f"Failed to inspect file at {file_path}: {str(e)}"}
+        return {"error": f"Failed to inspect working dataset: {str(e)}"}
 
-
-@mcp.tool()
-def detect_task_and_target(file_path: str, user_task: Optional[str] = None,
-                            user_target: Optional[str] = None) -> Dict[str, Any]:
-    """Inspects a CSV file and validates or auto-detects task type and target column."""
-    try:
-        df = pd.read_csv(file_path)
-    except Exception as e:
-        return {"error": f"Failed to read file at {file_path}: {str(e)}"}
-    columns = list(df.columns)
-
-    if not user_task or not user_target:
-        return {
-            "message": "Please specify task ('classification' or 'regression') and target column.",
-            "available_columns": columns,
-            "sample_data": df.head(2).to_dict()
-        }
-
-    task = user_task.lower().strip()
-    valid_tasks = ['classification', 'regression']
-    if task not in valid_tasks:
-        return {"error": f"Invalid task. Choose from {valid_tasks}"}
-
-    column_list = {c.lower().strip(): c for c in columns}
-    target_clean = user_target.lower().strip()
-    if target_clean not in column_list:
-        return {"error": f"Column '{user_target}' not found. Available columns: {columns}"}
-    target_col = column_list[target_clean]
-    return {"status": "success","task_type": task,"target": target_col,"message": f"Task set to '{task}' and target set to '{target_col}'."}
 
 # ------------------- 2. COMPULSORY BASE PREPROCESSING TOOL ------------------- #
 
