@@ -48,7 +48,7 @@ async def run_pipeline(request: Request):
         tools = [inspect_dataset_summary,tool_run_base_cleanup,tool_preprocess_categorical_features,train_and_evaluate_models,
             tool_process_and_reduce_numeric_features,tool_drop_datetime_columns,tool_extract_text_sentiment,tool_drop_irrelevant_columns,]
         # Use agent_llm to avoid shadowing the global llm instance
-        agent_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0).bind_tools(tools)
+        agent_llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0).bind_tools(tools)
         system_instruction = (
             "You are an expert AutoML data scientist. You must:\n"
             "1. ALWAYS call inspect_dataset_summary first using the provided working_dir.\n"
@@ -90,6 +90,20 @@ async def run_pipeline(request: Request):
         return JSONResponse({"status": "success","working_dir": working_dir,"final_summary": messages[-1].content})
     except Exception as e:
         return JSONResponse({"error": f"Pipeline execution failed: {str(e)}"}, status_code=500)
+
+@mcp.custom_route("/api/run-pipeline-stream", methods=["POST"])
+async def run_pipeline_stream(request: Request):
+    # Instead of waiting for the end, yield updates as they happen:
+    async def event_generator():
+        yield "data: 🔍 Inspecting dataset...\n\n"
+        # run inspect_dataset_summary
+        yield "data: 🧹 Running base cleanup...\n\n"
+        # run tool_run_base_cleanup
+        yield "data: 🤖 Training models...\n\n"
+        # stream final LLM summary word-by-word
+        for chunk in agent_llm.stream(messages):
+            yield f"data: {chunk.content}\n\n"
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @mcp.tool()
