@@ -2,13 +2,13 @@ import os
 import pandas as pd
 import io
 
-def create_working_dir(file_path: str) -> str:
+def create_working_dir(filename: str) -> str:
     """Generates a unique project working directory under data/ and creates it."""
-    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    base_name = os.path.splitext(os.path.basename(filename))[0]
     i = 1
-    while os.path.exists(f"data/{base_name}_project{i}"):
+    while os.path.exists(f"/tmp/data/{base_name}_project{i}"):
         i += 1
-    working_dir = f"data/{base_name}_project{i}"
+    working_dir = f"/tmp/data/{base_name}_project{i}"
     os.makedirs(working_dir, exist_ok=True)
     return working_dir
 
