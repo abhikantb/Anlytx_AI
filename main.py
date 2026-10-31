@@ -59,7 +59,10 @@ async def run_pipeline(request: Request):
             "2. Carefully read the sample data rows, column types, shape, and null percentages.\n"
             "3. Decide which cleaning and preprocessing tools to call based on the observed data.\n"
             "4. Finally, call train_and_evaluate_models to finish the training process.\n"
-            "5. Your final answer must be plain text only: no markdown, no tables, no asterisks. Use short lines starting with a dash, and keep it under 200 words."
+            "5. Your final answer must be plain text only: no markdown, no tables, no asterisks. "
+            "Use short lines starting with a dash. Include: dataset size before and after cleaning, "
+            "columns converted to numeric, rows dropped and why, then each model with its train, test and CV scores, "
+            "then the best model and the reason. Never say results are stored elsewhere; always state the numbers. Keep it under 250 words."
         )
         user_prompt = (
             f"Dataset working_dir: '{working_dir}'\n"
@@ -103,22 +106,6 @@ async def run_pipeline(request: Request):
         return JSONResponse({"status": "success","working_dir": working_dir,"final_summary": messages[-1].content,"report": report})
     except Exception as e:
         return JSONResponse({"error": f"Pipeline execution failed: {str(e)}"}, status_code=500)
-
-@mcp.custom_route("/api/run-pipeline-stream", methods=["POST"])
-async def run_pipeline_stream(request: Request):
-    # Instead of waiting for the end, yield updates as they happen:
-    async def event_generator():
-        yield "data: 🔍 Inspecting dataset...\n\n"
-        # run inspect_dataset_summary
-        yield "data: 🧹 Running base cleanup...\n\n"
-        # run tool_run_base_cleanup
-        yield "data: 🤖 Training models...\n\n"
-        # stream final LLM summary word-by-word
-        for chunk in agent_llm.stream(messages):
-            yield f"data: {chunk.content}\n\n"
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
 
 @mcp.tool()
 def inspect_dataset_summary(working_dir: str) -> Dict[str, Any]:
