@@ -56,3 +56,39 @@ def log_step(working_dir: str, step: str, details: dict) -> dict:
     with open(path, "w") as f:
         json.dump(report, f, indent=2, default=str)
     return report
+
+
+def build_summary(report: dict) -> str:
+    """Builds a plain-text summary directly from report.json (no LLM)."""
+    steps = {s["step"]: s for s in report.get("steps", [])}
+    lines = ["Pipeline completed."]
+
+    ins = steps.get("inspect_dataset_summary")
+    if ins:
+        lines.append(f"- Dataset: {ins['shape']['rows']} rows x {ins['shape']['columns']} columns, {ins['total_null_cells']} missing cells.")
+
+    base = steps.get("tool_run_base_cleanup")
+    if base:
+        lines.append(f"- Base cleanup: {base['initial_shape']['rows']} -> {base['cleaned_shape']['rows']} rows.")
+        if base.get("columns_converted_to_numeric"):
+            lines.append(f"- Converted to numeric: {', '.join(base['columns_converted_to_numeric'])}.")
+        lines.append(f"- Rows dropped: {base.get('rows_dropped_because_target_missing', 0)} (target missing), {base.get('rows_dropped_by_missing_value_handling', 0)} (missing-value rules).")
+
+    cat = steps.get("tool_preprocess_categorical_features")
+    if cat:
+        lines.append(f"- Encoded text columns: {', '.join(cat['text_columns_encoded']) or 'none'} (now {cat['shape_after']['columns']} columns).")
+
+    num = steps.get("tool_process_and_reduce_numeric_features")
+    if num:
+        lines.append(f"- Numeric step: {num['rows_removed_as_outliers']} outlier rows removed, {len(num['columns_removed'])} columns removed, final {num['shape_after']['columns']} columns.")
+
+    train = steps.get("train_and_evaluate_models")
+    if train:
+        metric = "R2" if train["task_type"] == "regression" else "accuracy"
+        lines.append(f"- Task: {train['task_type']}, target: {train['target']}, metric: {metric}.")
+        for m in train["model_results"]:
+            lines.append(f"- {m['model_name']}: train {m['train_acc']:.3f}, test {m['test_acc']:.3f}, CV {m['cv_score']:.3f}")
+        lines.append(f"- Best model: {train['best_model']} (highest cross-validation score).")
+
+    lines.append("Ask me anything about these results below.")
+    return "\n".join(lines)

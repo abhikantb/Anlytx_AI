@@ -17,8 +17,8 @@ mcp = FastMCP("Anlytx_AI")
 from backend.graph.workflow import app
 from backend.tools.utils import create_working_dir,save_step_output,process_and_save_upload,log_step
 from backend.tools.preprocessing import (
-    run_base_preprocessing,     run_categorical_preprocessing,     run_numerical_preprocessing,
-    drop_datetime_columns,     extract_text_sentiment,     drop_irrelevant_columns ,    convert_numeric_strings)
+    run_base_preprocessing,     run_categorical_preprocessing,     run_numerical_preprocessing, 
+    drop_datetime_columns,     extract_text_sentiment,     drop_irrelevant_columns ,    convert_numeric_strings, build_summary)
 
 
 # ------------------- 1. DISCOVERY & TASK SETUP TOOLS ------------------- #
@@ -88,8 +88,20 @@ async def run_pipeline(request: Request):
                 break
             for tool_call in response.tool_calls:
                 tool_fn = tool_map.get(tool_call["name"])
+
                 # Execute tool directly
-                tool_output = tool_fn(**tool_call["args"])
+                args = dict(tool_call["args"])
+                args["working_dir"] = working_dir
+                if tool_call["name"] in ("tool_run_base_cleanup", "tool_preprocess_categorical_features"):
+                    args["target"] = target
+                if tool_call["name"] == "tool_process_and_reduce_numeric_features":
+                    args["target_col"] = target
+                    args["task_type"] = task_type
+                if tool_call["name"] == "train_and_evaluate_models":
+                    args["target"] = target
+                    args["task_type"] = task_type
+                tool_output = tool_fn(**args)
+
                 raw = json.dumps(tool_output, default=str) if isinstance(tool_output, dict) else str(tool_output)
                 content = raw if len(raw) <= 1500 else raw[:1500] + " ...[truncated]"
                 messages.append({
@@ -103,7 +115,7 @@ async def run_pipeline(request: Request):
         if os.path.exists(report_path):
             with open(report_path, "r") as f:
                 report = json.load(f)
-        return JSONResponse({"status": "success","working_dir": working_dir,"final_summary": messages[-1].content,"report": report})
+        return JSONResponse({"status": "success","working_dir": working_dir,"final_summary": build_summary(report),"report": report})
     except Exception as e:
         return JSONResponse({"error": f"Pipeline execution failed: {str(e)}"}, status_code=500)
 
@@ -162,7 +174,10 @@ def tool_run_base_cleanup(working_dir: str, target: Optional[str] = None) -> Dic
             df = df.dropna(subset=[target])
             rows_dropped_missing_target = before - len(df)
 
+        rows_before_missing = len(df)
+        nulls_by_column = {c: int(n) for c, n in df.isnull().sum().items() if n > 0}
         df = run_base_preprocessing(df)
+        rows_dropped_missing_handling = rows_before_missing - len(df)
 
         out_path = save_step_output(df, working_dir)
         dropped_cols = list(cols_before - set(df.columns))
@@ -176,6 +191,9 @@ def tool_run_base_cleanup(working_dir: str, target: Optional[str] = None) -> Dic
             "dropped_columns": dropped_cols,
             "columns_converted_to_numeric": converted_cols,
             "rows_dropped_because_target_missing": rows_dropped_missing_target,
+            "missing_values_by_column_before_imputation": nulls_by_column,
+            "rows_dropped_by_missing_value_handling": rows_dropped_missing_handling,
+            "missing_value_rules": "numeric columns with more than 30% missing are dropped; text columns with under 5% missing lose those rows; other missing values are filled with median, mean or most frequent value",
             "actions": "converted number-like text to numeric, dropped rows with missing target, trimmed whitespace, converted inf to NaN, dropped empty columns, imputed missing values",
         })
 
@@ -191,17 +209,37 @@ def tool_run_base_cleanup(working_dir: str, target: Optional[str] = None) -> Dic
         return {"error": f"Base cleanup failed: {str(e)}"}
 
 @mcp.tool()
-def tool_preprocess_categorical_features(working_dir: str) -> Dict[str, Any]:
-    """MACRO TOOL 2: Cleans, groups rare categories, converts numeric strings, and encodes object columns."""
+def tool_preprocess_categorical_features(working_dir: str, target: Optional[str] = None) -> Dict[str, Any]:
+    """MACRO TOOL 2: Cleans, groups rare categories, converts numeric strings, and encodes object columns.
+    The target column is never encoded or changed."""
     try:
         file_path = os.path.join(working_dir, "working_dataset.csv")
         df = pd.read_csv(file_path)
+        shape_before = df.shape
+        cols_before = list(df.columns)
+        text_cols = [c for c in df.select_dtypes(include='object').columns if c != target]
+        target_series = None
+        if target and target in df.columns:
+            target_series = df[target]
+            df = df.drop(columns=[target])
         df = run_categorical_preprocessing(df)
+        if target_series is not None:
+            df[target] = target_series.values
         out_path = save_step_output(df, working_dir)
+        new_cols = [c for c in df.columns if c not in cols_before]
+        log_step(working_dir, "tool_preprocess_categorical_features", {
+            "shape_before": {"rows": shape_before[0], "columns": shape_before[1]},
+            "shape_after": {"rows": df.shape[0], "columns": df.shape[1]},
+            "text_columns_encoded": text_cols,
+            "new_columns_created_count": len(new_cols),
+            "target_protected": target,
+            "actions": "lowercased text, grouped rare categories into 'other', converted numeric strings, one-hot encoded text columns (target left unchanged)",
+        })
         return {
             "status": "success",
             "output_path": out_path,
-            "resulting_shape": {"rows": df.shape[0], "columns": df.shape[1]}
+            "resulting_shape": {"rows": df.shape[0], "columns": df.shape[1]},
+            "text_columns_encoded": text_cols
         }
     except Exception as e:
         return {"error": f"Categorical preprocessing failed: {str(e)}"}
@@ -214,16 +252,29 @@ def tool_process_and_reduce_numeric_features(working_dir: str, target_col: Optio
     try:
         file_path = os.path.join(working_dir, "working_dataset.csv")
         df = pd.read_csv(file_path)
+        shape_before = df.shape
+        cols_before = set(df.columns)
         df = run_numerical_preprocessing(df, target_col=target_col, task_type=task_type, k=k, use_pca=use_pca)
         out_path = save_step_output(df, working_dir)
+        dropped_cols = sorted(cols_before - set(df.columns))
+        log_step(working_dir, "tool_process_and_reduce_numeric_features", {
+            "shape_before": {"rows": shape_before[0], "columns": shape_before[1]},
+            "shape_after": {"rows": df.shape[0], "columns": df.shape[1]},
+            "rows_removed_as_outliers": shape_before[0] - df.shape[0],
+            "columns_removed": dropped_cols,
+            "kept_columns": list(df.columns),
+            "k_features_limit": k,
+            "pca_used": use_pca,
+            "actions": "dropped near-constant columns, removed or capped outliers (IQR), scaled with Yeo-Johnson, removed highly correlated columns (above 0.9), selected top features",
+        })
         return {
             "status": "success",
             "output_path": out_path,
             "final_shape": {"rows": df.shape[0], "columns": df.shape[1]},
-            "remaining_columns": list(df.columns)
+            "columns_removed": dropped_cols
         }
     except Exception as e:
-        return {"error": f"Numerical processing failed: {str(e)}"}   
+        return {"error": f"Numerical processing failed: {str(e)}"}
 
 
 
