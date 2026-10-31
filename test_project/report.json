@@ -1,0 +1,9 @@
+{
+  "steps": [
+    {
+      "step": "hello",
+      "time": "2026-10-31T22:12:34.368884",
+      "total_null_cells": 2
+    }
+  ]
+}

@@ -15,7 +15,7 @@ mcp = FastMCP("Anlytx_AI")
 
 # Import required packages from other modules
 from backend.graph.workflow import app
-from backend.tools.utils import create_working_dir,save_step_output,process_and_save_upload
+from backend.tools.utils import create_working_dir,save_step_output,process_and_save_upload,log_step
 from backend.tools.preprocessing import (
     run_base_preprocessing,     run_categorical_preprocessing,     run_numerical_preprocessing,
     drop_datetime_columns,     extract_text_sentiment,     drop_irrelevant_columns )
@@ -87,7 +87,13 @@ async def run_pipeline(request: Request):
                     "tool_call_id": tool_call["id"],
                     "content": json.dumps(tool_output) if isinstance(tool_output, dict) else str(tool_output)
                 })
-        return JSONResponse({"status": "success","working_dir": working_dir,"final_summary": messages[-1].content})
+
+        report_path = os.path.join(working_dir, "report.json")
+        report = {}
+        if os.path.exists(report_path):
+            with open(report_path, "r") as f:
+                report = json.load(f)
+        return JSONResponse({"status": "success","working_dir": working_dir,"final_summary": messages[-1].content,"report": report})
     except Exception as e:
         return JSONResponse({"error": f"Pipeline execution failed: {str(e)}"}, status_code=500)
 
@@ -107,6 +113,7 @@ async def run_pipeline_stream(request: Request):
 
 
 @mcp.tool()
+@mcp.tool()
 def inspect_dataset_summary(working_dir: str) -> Dict[str, Any]:
     """CRITICAL: You MUST ALWAYS use this tool FIRST on the provided working_dir.
     Inspects the dataset shape, dtypes, null percentages, and first sample rows 
@@ -117,13 +124,21 @@ def inspect_dataset_summary(working_dir: str) -> Dict[str, Any]:
         return {"error": f"Working file not found at {file_path}"}
     try:
         df = pd.read_csv(file_path)
-        return {
+        result = {
             "working_dir": working_dir,
             "shape": {"rows": df.shape[0], "columns": df.shape[1]},
             "dtypes": df.dtypes.astype(str).to_dict(),
             "missing_pct": (df.isnull().mean() * 100).round(2).to_dict(),
             "sample_data": df.head(5).to_dict(orient="records")
         }
+        # Save the facts (without sample rows) to report.json
+        log_step(working_dir, "inspect_dataset_summary", {
+            "shape": result["shape"],
+            "dtypes": result["dtypes"],
+            "missing_pct": result["missing_pct"],
+            "total_null_cells": int(df.isnull().sum().sum()),
+        })
+        return result
     except Exception as e:
         return {"error": f"Failed to inspect working dataset: {str(e)}"}
 
@@ -142,18 +157,36 @@ def tool_run_base_cleanup(working_dir: str) -> Dict[str, Any]:
         file_path = os.path.join(working_dir, "working_dataset.csv")
         df = pd.read_csv(file_path)
         initial_shape = df.shape
+        nulls_before = int(df.isnull().sum().sum())
+        cols_before = set(df.columns)
+
         # Executes the unified compulsory function
         df = run_base_preprocessing(df)
+
         out_path = save_step_output(df, working_dir)
+        dropped_cols = list(cols_before - set(df.columns))
+        remaining_nulls = int(df.isnull().sum().sum())
+
+        log_step(working_dir, "tool_run_base_cleanup", {
+            "initial_shape": {"rows": initial_shape[0], "columns": initial_shape[1]},
+            "cleaned_shape": {"rows": df.shape[0], "columns": df.shape[1]},
+            "nulls_before": nulls_before,
+            "nulls_after": remaining_nulls,
+            "dropped_columns": dropped_cols,
+            "actions": "trimmed whitespace, converted inf to NaN, dropped empty/constant columns, imputed missing values",
+        })
+
         return {
             "status": "success",
             "output_path": out_path,
             "initial_shape": {"rows": initial_shape[0], "columns": initial_shape[1]},
             "cleaned_shape": {"rows": df.shape[0], "columns": df.shape[1]},
-            "remaining_nulls": int(df.isnull().sum().sum())
+            "remaining_nulls": remaining_nulls
         }
     except Exception as e:
         return {"error": f"Base cleanup failed: {str(e)}"}
+
+    
 
 @mcp.tool()
 def tool_preprocess_categorical_features(working_dir: str) -> Dict[str, Any]:
@@ -265,6 +298,19 @@ def train_and_evaluate_models(working_dir: str, task_type: str, target: str) -> 
         history = result.get("model_history", [])
         best_model = result.get("model_name", "Unknown")
         summary = result.get("evaluation_summary", "")
+
+        log_step(working_dir, "train_and_evaluate_models", {
+            "task_type": task_type,
+            "target": target,
+            "rows_used": int(df.shape[0]),
+            "features_used": [c for c in df.columns if c != target],
+            "models_evaluated": len(history),
+            "model_results": history,
+            "best_model": best_model,
+            "best_model_selected_by": "highest cross-validation score",
+            "evaluation_summary": summary,
+        })
+
         return (
             f"Pipeline completed successfully!\n"
             f"Working Directory: {working_dir}\n"

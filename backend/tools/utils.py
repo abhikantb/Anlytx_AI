@@ -1,6 +1,8 @@
 import os
 import pandas as pd
 import io
+import json
+import datetime
 
 def create_working_dir(filename: str) -> str:
     """Generates a unique project working directory under data/ and creates it."""
@@ -37,3 +39,20 @@ def process_and_save_upload(body_bytes: bytes, filename: str) -> tuple[str, list
     working_dir = create_working_dir(filename)
     save_step_output(df, working_dir, "working_dataset.csv")
     return working_dir, list(df.columns)
+
+def log_step(working_dir: str, step: str, details: dict) -> dict:
+    """Appends one step (what we did + facts) to report.json inside working_dir."""
+    path = os.path.join(working_dir, "report.json")
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            report = json.load(f)
+    else:
+        report = {"steps": []}
+    report["steps"].append({
+        "step": step,
+        "time": datetime.datetime.now().isoformat(),
+        **details
+    })
+    with open(path, "w") as f:
+        json.dump(report, f, indent=2, default=str)
+    return report
