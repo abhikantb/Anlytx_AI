@@ -18,7 +18,7 @@ from backend.graph.workflow import app
 from backend.tools.utils import create_working_dir,save_step_output,process_and_save_upload,log_step
 from backend.tools.preprocessing import (
     run_base_preprocessing,     run_categorical_preprocessing,     run_numerical_preprocessing,
-    drop_datetime_columns,     extract_text_sentiment,     drop_irrelevant_columns )
+    drop_datetime_columns,     extract_text_sentiment,     drop_irrelevant_columns ,    convert_numeric_strings)
 
 
 # ------------------- 1. DISCOVERY & TASK SETUP TOOLS ------------------- #
@@ -48,13 +48,18 @@ async def run_pipeline(request: Request):
         tools = [inspect_dataset_summary,tool_run_base_cleanup,tool_preprocess_categorical_features,train_and_evaluate_models,
             tool_process_and_reduce_numeric_features,tool_drop_datetime_columns,tool_extract_text_sentiment,tool_drop_irrelevant_columns,]
         # Use agent_llm to avoid shadowing the global llm instance
-        agent_llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0).bind_tools(tools)
+        primary = ChatGroq(model="openai/gpt-oss-120b", temperature=0).bind_tools(tools).with_retry(stop_after_attempt=3)
+        backup1 = ChatGroq(model="openai/gpt-oss-20b", temperature=0).bind_tools(tools).with_retry(stop_after_attempt=3)
+        backup2 = ChatGroq(model="qwen/qwen3.8-27b", temperature=0).bind_tools(tools).with_retry(stop_after_attempt=3)
+        agent_llm = primary.with_fallbacks([backup1, backup2])
+        
         system_instruction = (
             "You are an expert AutoML data scientist. You must:\n"
             "1. ALWAYS call inspect_dataset_summary first using the provided working_dir.\n"
             "2. Carefully read the sample data rows, column types, shape, and null percentages.\n"
             "3. Decide which cleaning and preprocessing tools to call based on the observed data.\n"
-            "4. Finally, call train_and_evaluate_models to finish the training process."
+            "4. Finally, call train_and_evaluate_models to finish the training process.\n"
+            "5. Your final answer must be plain text only: no markdown, no tables, no asterisks. Use short lines starting with a dash, and keep it under 200 words."
         )
         user_prompt = (
             f"Dataset working_dir: '{working_dir}'\n"
@@ -82,10 +87,12 @@ async def run_pipeline(request: Request):
                 tool_fn = tool_map.get(tool_call["name"])
                 # Execute tool directly
                 tool_output = tool_fn(**tool_call["args"])
+                raw = json.dumps(tool_output, default=str) if isinstance(tool_output, dict) else str(tool_output)
+                content = raw if len(raw) <= 1500 else raw[:1500] + " ...[truncated]"
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call["id"],
-                    "content": json.dumps(tool_output) if isinstance(tool_output, dict) else str(tool_output)
+                    "content": content
                 })
 
         report_path = os.path.join(working_dir, "report.json")
@@ -112,7 +119,7 @@ async def run_pipeline_stream(request: Request):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@mcp.tool()
+
 @mcp.tool()
 def inspect_dataset_summary(working_dir: str) -> Dict[str, Any]:
     """CRITICAL: You MUST ALWAYS use this tool FIRST on the provided working_dir.
@@ -146,12 +153,12 @@ def inspect_dataset_summary(working_dir: str) -> Dict[str, Any]:
 # ------------------- 2. COMPULSORY BASE PREPROCESSING TOOL ------------------- #
 
 @mcp.tool()
-def tool_run_base_cleanup(working_dir: str) -> Dict[str, Any]:
+def tool_run_base_cleanup(working_dir: str, target: Optional[str] = None) -> Dict[str, Any]:
     """Runs compulsory baseline dataset cleaning in optimal sequence:
-    1. Removes extra spaces / trims whitespaces
-    2. Handles infinite values (converts inf to NaN)
-    3. Drops completely empty or constant single-value columns
-    4. Imputes remaining missing values
+    1. Converts number-like text columns (e.g. '4,25,000', '45,000 kms') to numbers
+    2. Drops rows where the target column is empty (never imputes the target)
+    3. Trims whitespace, handles infinite values, drops empty columns, imputes missing values
+    Always pass the target column name in `target`.
     """
     try:
         file_path = os.path.join(working_dir, "working_dataset.csv")
@@ -160,7 +167,14 @@ def tool_run_base_cleanup(working_dir: str) -> Dict[str, Any]:
         nulls_before = int(df.isnull().sum().sum())
         cols_before = set(df.columns)
 
-        # Executes the unified compulsory function
+        df, converted_cols = convert_numeric_strings(df)
+
+        rows_dropped_missing_target = 0
+        if target and target in df.columns:
+            before = len(df)
+            df = df.dropna(subset=[target])
+            rows_dropped_missing_target = before - len(df)
+
         df = run_base_preprocessing(df)
 
         out_path = save_step_output(df, working_dir)
@@ -173,7 +187,9 @@ def tool_run_base_cleanup(working_dir: str) -> Dict[str, Any]:
             "nulls_before": nulls_before,
             "nulls_after": remaining_nulls,
             "dropped_columns": dropped_cols,
-            "actions": "trimmed whitespace, converted inf to NaN, dropped empty/constant columns, imputed missing values",
+            "columns_converted_to_numeric": converted_cols,
+            "rows_dropped_because_target_missing": rows_dropped_missing_target,
+            "actions": "converted number-like text to numeric, dropped rows with missing target, trimmed whitespace, converted inf to NaN, dropped empty columns, imputed missing values",
         })
 
         return {
@@ -181,12 +197,11 @@ def tool_run_base_cleanup(working_dir: str) -> Dict[str, Any]:
             "output_path": out_path,
             "initial_shape": {"rows": initial_shape[0], "columns": initial_shape[1]},
             "cleaned_shape": {"rows": df.shape[0], "columns": df.shape[1]},
-            "remaining_nulls": remaining_nulls
+            "remaining_nulls": remaining_nulls,
+            "columns_converted_to_numeric": converted_cols
         }
     except Exception as e:
         return {"error": f"Base cleanup failed: {str(e)}"}
-
-    
 
 @mcp.tool()
 def tool_preprocess_categorical_features(working_dir: str) -> Dict[str, Any]:

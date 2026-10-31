@@ -1,6 +1,7 @@
 import pandas as pd
 from sklearn.model_selection import train_test_split
 import numpy as np
+import re
 import os
 import requests
 from typing import Optional
@@ -64,6 +65,30 @@ def remove_extra_spaces(df:pd.DataFrame):
         df[col] = df[col].str.strip()
         df[col] = df[col].replace("", pd.NA)
     return df
+
+# 1.4b Convert number-like text columns (e.g. "4,25,000", "45,000 kms") to numeric
+NUMBER_PATTERN = re.compile(r'^\s*[₹$€£]?\s*-?\d[\d,]*(\.\d+)?\s*[A-Za-z%/.]*\s*$')
+
+def convert_numeric_strings(df: pd.DataFrame, threshold: float = 0.7):
+    """Converts text columns that mostly look like numbers into real numeric columns.
+    Returns (new_df, list_of_converted_columns)."""
+    df = df.copy()
+    converted = []
+    for col in df.select_dtypes(include='object').columns:
+        values = df[col].dropna().astype(str)
+        if len(values) == 0:
+            continue
+        looks_numeric = values.apply(lambda v: bool(NUMBER_PATTERN.match(v)))
+        if looks_numeric.mean() >= threshold:
+            def to_number(v):
+                v = str(v)
+                if not NUMBER_PATTERN.match(v):
+                    return np.nan
+                cleaned = re.match(r'^\s*[₹$€£]?\s*(-?\d[\d,]*(?:\.\d+)?)', v).group(1)
+                return float(cleaned.replace(',', ''))
+            df[col] = df[col].apply(lambda v: to_number(v) if pd.notna(v) else np.nan)
+            converted.append(col)
+    return df, converted
 
 # 1.5 Handles all missing values
 def handle_missing_values(df: pd.DataFrame, num_drop_thresh: float = 0.3, obj_drop_row_thresh: float = 0.05) -> pd.DataFrame:
