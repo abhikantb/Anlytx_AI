@@ -12,3 +12,4 @@ python-dotenv
 groq
 uv
 fastmcp
+vaderSentiment

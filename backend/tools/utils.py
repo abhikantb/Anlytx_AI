@@ -61,7 +61,7 @@ def log_step(working_dir: str, step: str, details: dict) -> dict:
 def build_summary(report: dict) -> str:
     """Builds a plain-text summary directly from report.json (no LLM)."""
     steps = {s["step"]: s for s in report.get("steps", [])}
-    lines = ["Pipeline completed."]
+    lines = ["PRELIMINARY QUICK REPORT (automated baseline: default settings, no tuning).", ""]
 
     ins = steps.get("inspect_dataset_summary")
     if ins:
@@ -73,6 +73,18 @@ def build_summary(report: dict) -> str:
         if base.get("columns_converted_to_numeric"):
             lines.append(f"- Converted to numeric: {', '.join(base['columns_converted_to_numeric'])}.")
         lines.append(f"- Rows dropped: {base.get('rows_dropped_because_target_missing', 0)} (target missing), {base.get('rows_dropped_by_missing_value_handling', 0)} (missing-value rules).")
+
+    dt = steps.get("tool_drop_datetime_columns")
+    if dt:
+        lines.append(f"- Date/time columns dropped: {', '.join(dt['dropped_columns']) or 'none found'}.")
+
+    irr = steps.get("tool_drop_irrelevant_columns")
+    if irr:
+        lines.append(f"- Irrelevant columns dropped: {', '.join(irr['dropped_columns']) or 'none'}.")
+
+    sent = steps.get("tool_extract_text_sentiment")
+    if sent:
+        lines.append(f"- Text column '{sent['text_column']}' converted to a sentiment score.")
 
     cat = steps.get("tool_preprocess_categorical_features")
     if cat:
@@ -86,9 +98,15 @@ def build_summary(report: dict) -> str:
     if train:
         metric = "R2" if train["task_type"] == "regression" else "accuracy"
         lines.append(f"- Task: {train['task_type']}, target: {train['target']}, metric: {metric}.")
+        if train.get("target_log_transformed"):
+            lines.append(f"- Target was highly skewed (skew {train['target_skew']:.1f}), so models were trained on its log and predictions converted back.")
+        if train.get("label_mapping"):
+            mapping_text = ", ".join(f"{k} = {v}" for k, v in train["label_mapping"].items())
+            lines.append(f"- Class labels used by the models: {mapping_text}.")
         for m in train["model_results"]:
             lines.append(f"- {m['model_name']}: train {m['train_acc']:.3f}, test {m['test_acc']:.3f}, CV {m['cv_score']:.3f}")
         lines.append(f"- Best model: {train['best_model']} (highest cross-validation score).")
+        lines.append("- Note: preprocessing was fitted on the full dataset before the split, so test scores may be slightly optimistic.")
 
     lines.append("Ask me anything about these results below.")
     return "\n".join(lines)

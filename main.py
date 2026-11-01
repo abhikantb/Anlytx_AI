@@ -81,18 +81,26 @@ async def run_pipeline(request: Request):
             "tool_drop_irrelevant_columns": tool_drop_irrelevant_columns,
             "train_and_evaluate_models": train_and_evaluate_models
         }
-        while True:
+        for _ in range(12):
             response = agent_llm.invoke(messages)
             messages.append(response)
             if not response.tool_calls:
                 break
             for tool_call in response.tool_calls:
                 tool_fn = tool_map.get(tool_call["name"])
+                if tool_fn is None:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": f"Unknown tool: {tool_call['name']}"
+                    })
+                    continue
 
                 # Execute tool directly
                 args = dict(tool_call["args"])
                 args["working_dir"] = working_dir
-                if tool_call["name"] in ("tool_run_base_cleanup", "tool_preprocess_categorical_features"):
+                if tool_call["name"] in ("tool_run_base_cleanup", "tool_preprocess_categorical_features",
+                                        "tool_drop_datetime_columns", "tool_drop_irrelevant_columns"):
                     args["target"] = target
                 if tool_call["name"] == "tool_process_and_reduce_numeric_features":
                     args["target_col"] = target
@@ -254,13 +262,17 @@ def tool_process_and_reduce_numeric_features(working_dir: str, target_col: Optio
         df = pd.read_csv(file_path)
         shape_before = df.shape
         cols_before = set(df.columns)
-        df = run_numerical_preprocessing(df, target_col=target_col, task_type=task_type, k=k, use_pca=use_pca)
+        outlier_log = {}
+        df = run_numerical_preprocessing(df, target_col=target_col, task_type=task_type, k=k, use_pca=use_pca, log=outlier_log)
         out_path = save_step_output(df, working_dir)
         dropped_cols = sorted(cols_before - set(df.columns))
         log_step(working_dir, "tool_process_and_reduce_numeric_features", {
             "shape_before": {"rows": shape_before[0], "columns": shape_before[1]},
             "shape_after": {"rows": df.shape[0], "columns": df.shape[1]},
             "rows_removed_as_outliers": shape_before[0] - df.shape[0],
+            "outlier_values_capped_by_column": outlier_log.get("values_capped_by_column", {}),
+            "outlier_rows_dropped_by_column": outlier_log.get("rows_dropped_by_column", {}),
+            "outlier_values_capped_total": sum(outlier_log.get("values_capped_by_column", {}).values()),
             "columns_removed": dropped_cols,
             "kept_columns": list(df.columns),
             "k_features_limit": k,
@@ -280,44 +292,65 @@ def tool_process_and_reduce_numeric_features(working_dir: str, target_col: Optio
 
 # ------------------- # 3. CONDITIONAL / DATA-DEPENDENT MCP TOOLS (Called selectively by Claude after data inspection) ------------------- #
 @mcp.tool()
-def tool_drop_datetime_columns(working_dir: str) -> Dict[str, Any]:
-    """Detects and drops date/time columns if identified as non-predictive timestamps."""
+def tool_drop_datetime_columns(working_dir: str, target: Optional[str] = None) -> Dict[str, Any]:
+    """Detects and drops date/time columns if identified as non-predictive timestamps. Never drops the target."""
     try:
         file_path = os.path.join(working_dir, "working_dataset.csv")
         df = pd.read_csv(file_path)
         initial_cols = df.columns.tolist()
+        target_series = None
+        if target and target in df.columns:
+            target_series = df[target]
+            df = df.drop(columns=[target])
         df = drop_datetime_columns(df)
-        dropped = list(set(initial_cols) - set(df.columns))
+        if target_series is not None:
+            df[target] = target_series.values
+        dropped = [c for c in initial_cols if c not in df.columns]
         out_path = save_step_output(df, working_dir)
+        log_step(working_dir, "tool_drop_datetime_columns", {
+            "dropped_columns": dropped,
+            "shape_after": {"rows": df.shape[0], "columns": df.shape[1]},
+            "actions": "dropped columns that look like dates or timestamps (they rarely help prediction)",
+        })
         return {"status": "success", "output_path": out_path, "dropped_columns": dropped}
     except Exception as e:
         return {"error": f"Failed to drop datetime columns: {str(e)}"}
 
 
 @mcp.tool()
-def tool_extract_text_sentiment(text_col: str, working_dir: str, model_type: str = "clef:27b") -> Dict[str, Any]:
-    """Extracts sentiment score from a specific review or text feedback column."""
+def tool_extract_text_sentiment(text_col: str, working_dir: str) -> Dict[str, Any]:
+    """Replaces a review/feedback text column with a numeric sentiment score (-1 to +1). English text only."""
     try:
         file_path = os.path.join(working_dir, "working_dataset.csv")
         df = pd.read_csv(file_path)
         if text_col not in df.columns:
             return {"error": f"Column '{text_col}' not found."}
-        df = extract_text_sentiment(df, text_col=text_col, model_type=model_type)
+        df = extract_text_sentiment(df, text_col=text_col)
         out_path = save_step_output(df, working_dir)
+        log_step(working_dir, "tool_extract_text_sentiment", {
+            "text_column": text_col,
+            "new_column": f"{text_col}_sentiment",
+            "actions": f"replaced text column '{text_col}' with a sentiment score from -1 (negative) to +1 (positive) using VADER",
+        })
         return {"status": "success", "output_path": out_path, "added_column": f"{text_col}_sentiment"}
     except Exception as e:
         return {"error": f"Failed to extract sentiment: {str(e)}"}
 
 
 @mcp.tool()
-def tool_drop_irrelevant_columns(cols_to_drop: List[str], working_dir: str) -> Dict[str, Any]:
-    """Drops high-cardinality IDs, hashes, or unneeded text columns explicitly."""
+def tool_drop_irrelevant_columns(cols_to_drop: List[str], working_dir: str, target: Optional[str] = None) -> Dict[str, Any]:
+    """Drops high-cardinality IDs, hashes, or unneeded text columns explicitly. Never drops the target."""
     try:
         file_path = os.path.join(working_dir, "working_dataset.csv")
         df = pd.read_csv(file_path)
-        existing_cols = [c for c in cols_to_drop if c in df.columns]
+        existing_cols = [c for c in cols_to_drop if c in df.columns and c != target]
         df = df.drop(columns=existing_cols)
         out_path = save_step_output(df, working_dir)
+        log_step(working_dir, "tool_drop_irrelevant_columns", {
+            "dropped_columns": existing_cols,
+            "shape_after": {"rows": df.shape[0], "columns": df.shape[1]},
+            "actions": "dropped ID-like or free-text columns chosen by the agent after looking at the data",
+        })
         return {"status": "success", "output_path": out_path, "dropped": existing_cols}
     except Exception as e:
         return {"error": f"Failed to drop irrelevant columns: {str(e)}"}
@@ -332,9 +365,7 @@ def train_and_evaluate_models(working_dir: str, task_type: str, target: str) -> 
         df = pd.read_csv(file_path)
     except Exception as e:
         return f"Error reading CSV file at {file_path}: {e}"
-
     os.makedirs(working_dir, exist_ok=True)
-
     initial_state = {
         "working_dir": working_dir,
         "df": df,
@@ -345,13 +376,11 @@ def train_and_evaluate_models(working_dir: str, task_type: str, target: str) -> 
         "evaluation_summary": None,
         "export_path": None,
     }
-
     try:
         result = app.invoke(initial_state)
         history = result.get("model_history", [])
         best_model = result.get("model_name", "Unknown")
         summary = result.get("evaluation_summary", "")
-
         log_step(working_dir, "train_and_evaluate_models", {
             "task_type": task_type,
             "target": target,
@@ -361,9 +390,17 @@ def train_and_evaluate_models(working_dir: str, task_type: str, target: str) -> 
             "model_results": history,
             "best_model": best_model,
             "best_model_selected_by": "highest cross-validation score",
+            "known_limitations": [
+                "Preprocessing (scaling, outlier handling, feature selection, missing-value filling) was fitted on the full dataset before the train/test split, so test scores may be slightly optimistic (data leakage).",
+                "Models use default settings with no hyperparameter tuning.",
+                "Scores come from a single train/test split plus 5-fold cross-validation.",
+            ],
             "evaluation_summary": summary,
-        })
+            "target_skew": history[0].get("target_skew") if history else None,
+            "target_log_transformed": bool(history and history[0].get("target_log_transformed")),
+            "label_mapping": history[0].get("label_mapping") if history else None,
 
+        })
         return (
             f"Pipeline completed successfully!\n"
             f"Working Directory: {working_dir}\n"
@@ -380,3 +417,6 @@ if __name__ == "__main__":
     host = os.getenv("MCP_HOST", "0.0.0.0")
     port = int(os.getenv("MCP_PORT", 8000))
     mcp.run(transport="sse", host=host, port=port)
+
+
+

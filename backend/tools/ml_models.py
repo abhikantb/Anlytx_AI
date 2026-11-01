@@ -1,4 +1,6 @@
 import pandas as pd
+import numpy as np
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, \
                              RandomForestRegressor, GradientBoostingRegressor
@@ -24,27 +26,37 @@ def train_and_evaluate_models(df, task_type, target, model_name='RandomForest'):
     X = df.drop(columns=[target])
     y = df[target]
 
+    target_skew = None
+    use_log = False
+    label_mapping = None
+
     # Validate target compatibility with task_type
     if task_type == 'classification':
         if pd.api.types.is_float_dtype(y) and y.nunique() > 20:
             raise ValueError(f"Task is 'classification' but target '{target}' is continuous float data.")
-        # Ensure target is discrete/categorical for classification metrics and StratifiedKFold
-        y = y.astype('category').cat.codes
+        y_cat = y.astype('category')
+        if len(y_cat.cat.categories) <= 20:
+            label_mapping = {int(i): str(c) for i, c in enumerate(y_cat.cat.categories)}
+        y = y_cat.cat.codes
     elif task_type == 'regression':
         if not pd.api.types.is_numeric_dtype(y):
             raise ValueError(f"Task is 'regression' but target '{target}' is non-numeric/string data.")
+        target_skew = float(y.skew())
+        use_log = bool(target_skew > 1 and y.min() >= 0)
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # Select model
     model = MODELS[task_type][model_name]
+    if use_log:
+        model = TransformedTargetRegressor(regressor=model, func=np.log1p, inverse_func=np.expm1)
     model.fit(X_train, y_train)
 
     # Evaluate
     train_preds = model.predict(X_train)
     test_preds = model.predict(X_test)
 
-    cv_model = MODELS[task_type][model_name]
+    cv_model = model
     if task_type == 'classification':
         training_accuracy = accuracy_score(y_train, train_preds)
         testing_accuracy = accuracy_score(y_test, test_preds)
@@ -66,5 +78,8 @@ def train_and_evaluate_models(df, task_type, target, model_name='RandomForest'):
         "training_accuracy": training_accuracy,
         "testing_accuracy": testing_accuracy,
         "cross_val_score": cv_scores.mean(),
-        "cross_val_scores": cv_scores.tolist()
+        "cross_val_scores": cv_scores.tolist(),
+        "target_skew": target_skew,
+        "target_log_transformed": use_log,
+        "label_mapping": label_mapping,
     }

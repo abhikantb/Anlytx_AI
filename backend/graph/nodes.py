@@ -21,7 +21,10 @@ def model_training_node(state: AgentState) -> Dict[str, Any]:
         "model_name": model_name,
         "train_acc": result['training_accuracy'],
         "test_acc": result['testing_accuracy'],
-        "cv_score": result['cross_val_score']
+        "cv_score": result['cross_val_score'],
+        "target_skew": result['target_skew'],
+        "target_log_transformed": result['target_log_transformed'],
+        "label_mapping": result['label_mapping'],
     }
     return {"model_history": state.get('model_history', []) + [model_result]}
 

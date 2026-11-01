@@ -137,15 +137,14 @@ def standardize_categories(df):
     return df
 
 # 2.2 handle cardinality and rare categories
-def handle_categories(df, threshold=0.1, max_categories=5):
+def handle_categories(df, rare_threshold=0.02, max_categories=10):
     df = df.copy()
     for col in df.select_dtypes(include='object').columns:
+        # 1. Group very rare categories (under 2%) into "other"
         freq = df[col].value_counts(normalize=True)
-        # rare logic
-        if freq.max() > threshold:
-            rare = freq[freq <= threshold].index
-            df[col] = df[col].replace(rare, "other")
-        # limit categories
+        rare = freq[freq < rare_threshold].index
+        df[col] = df[col].replace(rare, "other")
+        # 2. Keep only the 10 most common, the rest become "other"
         if df[col].nunique() > max_categories:
             top = df[col].value_counts().nlargest(max_categories).index
             df[col] = df[col].where(df[col].isin(top), "other")
@@ -153,41 +152,21 @@ def handle_categories(df, threshold=0.1, max_categories=5):
 
 
 # 2.3 text sentiment extraction if any feedback/comment type columns exist
-def extract_text_sentiment(df: pd.DataFrame, text_col: str, model_type: str = "clef:27b") -> pd.DataFrame:
-    """
-    Extracts numeric sentiment probability (0.0 to 1.0) from a text column 
-    using Ollama's /v1/systemone endpoint with the clef:27b model.
-    """
+def extract_text_sentiment(df: pd.DataFrame, text_col: str) -> pd.DataFrame:
+    """Replaces a text column with a numeric sentiment score from -1 (negative) to +1 (positive), using VADER (English only)."""
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
     df = df.copy()
     if text_col not in df.columns:
         return df
-    api_key = os.getenv("OLLAMA_API_KEY")
-    ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    url = f"{ollama_host}/v1/systemone"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    def get_sentiment_score(text: str) -> float:
+    analyzer = SentimentIntensityAnalyzer()
+
+    def score(text):
         if pd.isna(text) or str(text).strip() == "":
-            raise ValueError(f"Empty row found in text column '{text_col}'.")
-        payload = {
-            "model": model_type,
-            "state": {"text": text},
-            "questions": {
-                "sentiment": {
-                    "type": "noul",
-                    "instructions": "Is the sentiment of this text positive?"
-                }
-            }
-        }
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
-            response.raise_for_status()
-            res_data = response.json()
-            return res_data.get("answers", {}).get("sentiment", {}).get("noul", 0.5)
-        except Exception as e:
-            raise RuntimeError(f"Ollama API request failed: {e}")
-    df[text_col] = df[text_col].apply(get_sentiment_score)
+            return 0.0
+        return analyzer.polarity_scores(str(text))["compound"]
+
+    df[f"{text_col}_sentiment"] = df[text_col].apply(score)
+    df = df.drop(columns=[text_col])
     return df
 
 
@@ -245,8 +224,8 @@ def drop_low_variance(df, threshold=0.99):
     return df
 
 # 3.2 remove outliers
-def handle_outliers(df: pd.DataFrame, limit: float = 0.01) -> pd.DataFrame:
-    """Detects outliers on raw features using IQR. 
+def handle_outliers(df: pd.DataFrame, limit: float = 0.01, log: Optional[dict] = None) -> pd.DataFrame:
+    """Detects outliers on raw features using IQR.
     Drops rows if outlier count is tiny (<= limit), otherwise clips/caps values."""
     df = df.copy()
     for col in df.columns:
@@ -257,11 +236,13 @@ def handle_outliers(df: pd.DataFrame, limit: float = 0.01) -> pd.DataFrame:
         low, high = q1 - 1.5 * iqr, q3 + 1.5 * iqr
         outlier_mask = (df[col] < low) | (df[col] > high)
         ratio = outlier_mask.mean()
-        # Drop only if outliers represent a tiny fraction (e.g. <= 1%)
         if 0 < ratio <= limit:
+            if log is not None:
+                log.setdefault("rows_dropped_by_column", {})[col] = int(outlier_mask.sum())
             df = df[~outlier_mask]
         elif ratio > limit:
-            # Cap extreme values to preserve all rows
+            if log is not None:
+                log.setdefault("values_capped_by_column", {})[col] = int(outlier_mask.sum())
             df[col] = df[col].clip(lower=low, upper=high)
     return df
 
@@ -341,7 +322,8 @@ def run_categorical_preprocessing(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ------------------- C. Numerical Feature Engineering ------------------- #
-def run_numerical_preprocessing(df: pd.DataFrame, target_col: Optional[str] = None, task_type: Optional[str] = None, k: int = 10, use_pca: bool = False, n_components: int = 5) -> pd.DataFrame:
+def run_numerical_preprocessing(df: pd.DataFrame, target_col: Optional[str] = None, task_type: Optional[str] = None, 
+                                k: int = 10, use_pca: bool = False, n_components: int = 5,log: Optional[dict] = None) -> pd.DataFrame:
     """Sequential numerical pipeline: Drop Low Variance -> Handle Outliers -> Scale -> Remove Collinear -> Feature Selection / PCA."""
     df = df.copy()
     # C1. Separate features (X) and target (y) at the start
@@ -353,7 +335,7 @@ def run_numerical_preprocessing(df: pd.DataFrame, target_col: Optional[str] = No
         X = df
     # C2. Process features only
     X = drop_low_variance(X)
-    X = handle_outliers(X)
+    X = handle_outliers(X, log=log)
     X = scale_numeric_features(X)
     if len(X.columns) > 1:
         X = remove_correlated_features(X, X.columns.tolist())
