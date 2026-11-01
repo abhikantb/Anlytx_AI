@@ -58,6 +58,8 @@ async def run_pipeline(request: Request):
             "1. ALWAYS call inspect_dataset_summary first using the provided working_dir.\n"
             "2. Carefully read the sample data rows, column types, shape, and null percentages.\n"
             "3. Decide which cleaning and preprocessing tools to call based on the observed data.\n"
+            "3b. If a column holds long free text (reviews, comments, sentences), call tool_extract_text_sentiment on it BEFORE categorical preprocessing. "
+            "3c. If a text column is useless (IDs, names, links), drop it with tool_drop_irrelevant_columns. Never leave long text columns for categorical encoding.\n"
             "4. Finally, call train_and_evaluate_models to finish the training process.\n"
             "5. Your final answer must be plain text only: no markdown, no tables, no asterisks. "
             "Use short lines starting with a dash. Include: dataset size before and after cleaning, "

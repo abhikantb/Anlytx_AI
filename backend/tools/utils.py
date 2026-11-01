@@ -33,7 +33,7 @@ def process_and_save_upload(body_bytes: bytes, filename: str) -> tuple[str, list
     if ext not in ['.csv', '.xlsx', '.xls']:
         raise ValueError(f"Unsupported format '{ext}'. Only CSV and Excel (.xlsx, .xls) are allowed.")
     if ext == '.csv':
-        df = pd.read_csv(io.BytesIO(body_bytes))
+        df = pd.read_csv(io.BytesIO(body_bytes), sep=None, engine="python")
     else:
         df = pd.read_excel(io.BytesIO(body_bytes))
     working_dir = create_working_dir(filename)
