@@ -401,6 +401,7 @@ def train_and_evaluate_models(working_dir: str, task_type: str, target: str) -> 
             "target_skew": history[0].get("target_skew") if history else None,
             "target_log_transformed": bool(history and history[0].get("target_log_transformed")),
             "label_mapping": history[0].get("label_mapping") if history else None,
+            "majority_class_baseline_accuracy": history[0].get("majority_baseline") if history else None,
 
         })
         return (

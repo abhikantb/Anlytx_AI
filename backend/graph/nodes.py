@@ -25,6 +25,7 @@ def model_training_node(state: AgentState) -> Dict[str, Any]:
         "target_skew": result['target_skew'],
         "target_log_transformed": result['target_log_transformed'],
         "label_mapping": result['label_mapping'],
+        "majority_baseline": result['majority_baseline'],
     }
     return {"model_history": state.get('model_history', []) + [model_result]}
 

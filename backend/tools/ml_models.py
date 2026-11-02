@@ -29,6 +29,7 @@ def train_and_evaluate_models(df, task_type, target, model_name='RandomForest'):
     target_skew = None
     use_log = False
     label_mapping = None
+    majority_baseline = None
 
     # Validate target compatibility with task_type
     if task_type == 'classification':
@@ -38,6 +39,7 @@ def train_and_evaluate_models(df, task_type, target, model_name='RandomForest'):
         if len(y_cat.cat.categories) <= 20:
             label_mapping = {int(i): str(c) for i, c in enumerate(y_cat.cat.categories)}
         y = y_cat.cat.codes
+        majority_baseline = float(y.value_counts(normalize=True).max())
     elif task_type == 'regression':
         if not pd.api.types.is_numeric_dtype(y):
             raise ValueError(f"Task is 'regression' but target '{target}' is non-numeric/string data.")
@@ -82,4 +84,5 @@ def train_and_evaluate_models(df, task_type, target, model_name='RandomForest'):
         "target_skew": target_skew,
         "target_log_transformed": use_log,
         "label_mapping": label_mapping,
+        "majority_baseline": majority_baseline,
     }

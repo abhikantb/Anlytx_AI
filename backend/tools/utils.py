@@ -103,6 +103,8 @@ def build_summary(report: dict) -> str:
         if train.get("label_mapping"):
             mapping_text = ", ".join(f"{k} = {v}" for k, v in train["label_mapping"].items())
             lines.append(f"- Class labels used by the models: {mapping_text}.")
+        if train.get("majority_class_baseline_accuracy") is not None:
+            lines.append(f"- Baseline: always guessing the most common class scores {train['majority_class_baseline_accuracy']:.3f} accuracy, so models should beat this.")
         for m in train["model_results"]:
             lines.append(f"- {m['model_name']}: train {m['train_acc']:.3f}, test {m['test_acc']:.3f}, CV {m['cv_score']:.3f}")
         lines.append(f"- Best model: {train['best_model']} (highest cross-validation score).")
