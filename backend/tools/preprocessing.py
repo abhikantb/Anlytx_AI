@@ -323,7 +323,7 @@ def run_categorical_preprocessing(df: pd.DataFrame) -> pd.DataFrame:
 
 # ------------------- C. Numerical Feature Engineering ------------------- #
 def run_numerical_preprocessing(df: pd.DataFrame, target_col: Optional[str] = None, task_type: Optional[str] = None, 
-                                k: int = 10, use_pca: bool = False, n_components: int = 5,log: Optional[dict] = None) -> pd.DataFrame:
+                                k: int = 10, use_pca: bool = False, n_components: int = 5, log: Optional[dict] = None) -> pd.DataFrame:
     """Sequential numerical pipeline: Drop Low Variance -> Handle Outliers -> Scale -> Remove Collinear -> Feature Selection / PCA."""
     df = df.copy()
     # C1. Separate features (X) and target (y) at the start
@@ -333,18 +333,26 @@ def run_numerical_preprocessing(df: pd.DataFrame, target_col: Optional[str] = No
     else:
         y = None
         X = df
+
     # C2. Process features only
     X = drop_low_variance(X)
     X = handle_outliers(X, log=log)
+
+    # --- FIX: Synchronize y rows with X if handle_outliers dropped rows --- #
+    if y is not None:
+        y = y.loc[X.index]
+
     X = scale_numeric_features(X)
     if len(X.columns) > 1:
         X = remove_correlated_features(X, X.columns.tolist())
+
     # C3. Apply Feature Selection or PCA on X using y
     if y is not None and task_type:
         if use_pca and X.shape[1] > n_components:
             X = apply_pca(X, n_components=n_components)
         elif X.shape[1] > k:
             X = select_best_features(X, y, task_type=task_type, k=k)
+
     # C4. Re-attach target column back to dataframe
     if y is not None:
         X[target_col] = y
