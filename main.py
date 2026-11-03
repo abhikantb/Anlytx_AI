@@ -15,7 +15,7 @@ mcp = FastMCP("Anlytx_AI")
 
 # Import required packages from other modules
 from backend.graph.workflow import app
-from backend.tools.utils import create_working_dir,save_step_output,process_and_save_upload,log_step,build_summary
+from backend.tools.utils import create_working_dir,save_step_output,process_and_save_upload,log_step,build_summary,strip_key
 from backend.tools.preprocessing import (
     run_base_preprocessing,     run_categorical_preprocessing,     run_numerical_preprocessing, 
     drop_datetime_columns,     extract_text_sentiment,     drop_irrelevant_columns ,    convert_numeric_strings)
@@ -125,7 +125,8 @@ async def run_pipeline(request: Request):
         if os.path.exists(report_path):
             with open(report_path, "r") as f:
                 report = json.load(f)
-        return JSONResponse({"status": "success","working_dir": working_dir,"final_summary": build_summary(report),"report": report})
+        chat_report = strip_key(report)
+        return JSONResponse({"status": "success","working_dir": working_dir,"final_summary": build_summary(report),"report": chat_report})
     except Exception as e:
         return JSONResponse({"error": f"Pipeline execution failed: {str(e)}"}, status_code=500)
 

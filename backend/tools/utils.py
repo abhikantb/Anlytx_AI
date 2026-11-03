@@ -92,8 +92,8 @@ def build_summary(report: dict) -> str:
 
     num = steps.get("tool_process_and_reduce_numeric_features")
     if num:
-        lines.append(f"- Numeric step: {num['rows_removed_as_outliers']} outlier rows removed, {len(num['columns_removed'])} columns removed, final {num['shape_after']['columns']} columns.")
-
+        capped = num.get("outlier_values_capped", 0)
+        lines.append(f"- Numeric step: {capped} outlier values capped (rows kept), {len(num['columns_removed'])} columns removed, final {num['shape_after']['columns']} columns.")
     train = steps.get("train_and_evaluate_models")
     if train:
         metric = "R2" if train["task_type"] == "regression" else "accuracy"
@@ -112,3 +112,12 @@ def build_summary(report: dict) -> str:
 
     lines.append("Ask me anything about these results below.")
     return "\n".join(lines)
+
+
+def strip_key(obj, key="evaluation_summary"):
+    """Remove a key everywhere inside a nested dict/list (returns a new copy)."""
+    if isinstance(obj, dict):
+        return {k: strip_key(v, key) for k, v in obj.items() if k != key}
+    if isinstance(obj, list):
+        return [strip_key(item, key) for item in obj]
+    return obj
