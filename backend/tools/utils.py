@@ -3,6 +3,11 @@ import pandas as pd
 import io
 import json
 import datetime
+from backend.tools.preprocessing import (
+    run_base_preprocessing,    run_categorical_preprocessing,
+    run_numerical_preprocessing,     convert_numeric_strings,
+)
+
 
 def create_working_dir(filename: str) -> str:
     """Generates a unique project working directory under data/ and creates it."""
@@ -121,3 +126,156 @@ def strip_key(obj, key="evaluation_summary"):
     if isinstance(obj, list):
         return [strip_key(item, key) for item in obj]
     return obj
+
+
+# ------------------- COMPULSORY PIPELINE STEPS (always run, in fixed order) ------------------- #
+
+def _read_working(working_dir: str) -> pd.DataFrame:
+    return pd.read_csv(os.path.join(working_dir, "working_dataset.csv"))
+
+
+def inspect_dataset(working_dir: str) -> dict:
+    """Inspects the dataset (code runs it, result is given to the LLM in its prompt)."""
+    df = _read_working(working_dir)
+    result = {
+        "shape": {"rows": df.shape[0], "columns": df.shape[1]},
+        "dtypes": df.dtypes.astype(str).to_dict(),
+        "missing_pct": (df.isnull().mean() * 100).round(2).to_dict(),
+        "sample_data": df.head(5).to_dict(orient="records"),
+    }
+    log_step(working_dir, "inspect_dataset_summary", {
+        "shape": result["shape"],
+        "dtypes": result["dtypes"],
+        "missing_pct": result["missing_pct"],
+        "total_null_cells": int(df.isnull().sum().sum()),
+    })
+    return result
+
+
+def run_base_cleanup(working_dir: str, target: str) -> None:
+    df = _read_working(working_dir)
+    initial_shape = df.shape
+    nulls_before = int(df.isnull().sum().sum())
+    cols_before = set(df.columns)
+
+    df, converted_cols = convert_numeric_strings(df)
+
+    rows_dropped_missing_target = 0
+    if target in df.columns:
+        before = len(df)
+        df = df.dropna(subset=[target])
+        rows_dropped_missing_target = before - len(df)
+
+    rows_before_missing = len(df)
+    nulls_by_column = {c: int(n) for c, n in df.isnull().sum().items() if n > 0}
+    df = run_base_preprocessing(df)
+    rows_dropped_missing_handling = rows_before_missing - len(df)
+
+    save_step_output(df, working_dir)
+    log_step(working_dir, "tool_run_base_cleanup", {
+        "initial_shape": {"rows": initial_shape[0], "columns": initial_shape[1]},
+        "cleaned_shape": {"rows": df.shape[0], "columns": df.shape[1]},
+        "nulls_before": nulls_before,
+        "nulls_after": int(df.isnull().sum().sum()),
+        "dropped_columns": list(cols_before - set(df.columns)),
+        "columns_converted_to_numeric": converted_cols,
+        "rows_dropped_because_target_missing": rows_dropped_missing_target,
+        "missing_values_by_column_before_imputation": nulls_by_column,
+        "rows_dropped_by_missing_value_handling": rows_dropped_missing_handling,
+        "missing_value_rules": "numeric columns with more than 30% missing are dropped; text columns with under 5% missing lose those rows; other missing values are filled with median, mean or most frequent value",
+        "actions": "converted number-like text to numeric, dropped rows with missing target, trimmed whitespace, converted inf to NaN, dropped empty columns, imputed missing values",
+    })
+
+
+def run_categorical(working_dir: str, target: str) -> None:
+    df = _read_working(working_dir)
+    shape_before = df.shape
+    cols_before = list(df.columns)
+    text_cols = [c for c in df.select_dtypes(include="object").columns if c != target]
+
+    target_series = None
+    if target in df.columns:
+        target_series = df[target]
+        df = df.drop(columns=[target])
+    df = run_categorical_preprocessing(df)
+    if target_series is not None:
+        df[target] = target_series.values
+
+    save_step_output(df, working_dir)
+    new_cols = [c for c in df.columns if c not in cols_before]
+    log_step(working_dir, "tool_preprocess_categorical_features", {
+        "shape_before": {"rows": shape_before[0], "columns": shape_before[1]},
+        "shape_after": {"rows": df.shape[0], "columns": df.shape[1]},
+        "text_columns_encoded": text_cols,
+        "new_columns_created_count": len(new_cols),
+        "target_protected": target,
+        "actions": "lowercased text, grouped rare categories into 'other', converted numeric strings, one-hot encoded text columns (target left unchanged)",
+    })
+
+
+def run_numeric(working_dir: str, target: str, task_type: str) -> None:
+    df = _read_working(working_dir)
+    shape_before = df.shape
+    cols_before = set(df.columns)
+    outlier_log = {}
+    df = run_numerical_preprocessing(df, target_col=target, task_type=task_type, log=outlier_log)
+
+    save_step_output(df, working_dir)
+    capped = outlier_log.get("values_capped_by_column", {})
+    log_step(working_dir, "tool_process_and_reduce_numeric_features", {
+        "shape_before": {"rows": shape_before[0], "columns": shape_before[1]},
+        "shape_after": {"rows": df.shape[0], "columns": df.shape[1]},
+        "rows_removed_as_outliers": shape_before[0] - df.shape[0],
+        "outlier_values_capped_by_column": capped,
+        "outlier_rows_dropped_by_column": outlier_log.get("rows_dropped_by_column", {}),
+        "outlier_values_capped_total": sum(capped.values()),
+        "columns_removed": sorted(cols_before - set(df.columns)),
+        "kept_columns": list(df.columns),
+        "k_features_limit": 10,
+        "pca_used": False,
+        "actions": "dropped near-constant columns, removed or capped outliers (IQR), scaled with Yeo-Johnson, removed highly correlated columns (above 0.9), selected top features",
+    })
+
+
+def run_training(working_dir: str, target: str, task_type: str) -> None:
+    from backend.graph.workflow import app   # imported here to avoid a circular import
+    df = _read_working(working_dir)
+    result = app.invoke({
+        "working_dir": working_dir,
+        "df": df,
+        "task_type": task_type,
+        "target": target,
+        "model_name": None,
+        "model_history": [],
+        "evaluation_summary": None,
+        "export_path": None,
+    })
+    history = result.get("model_history", [])
+    log_step(working_dir, "train_and_evaluate_models", {
+        "task_type": task_type,
+        "target": target,
+        "rows_used": int(df.shape[0]),
+        "features_used": [c for c in df.columns if c != target],
+        "models_evaluated": len(history),
+        "model_results": history,
+        "best_model": result.get("model_name", "Unknown"),
+        "best_model_selected_by": "highest cross-validation score",
+        "known_limitations": [
+            "Preprocessing (scaling, outlier handling, feature selection, missing-value filling) was fitted on the full dataset before the train/test split, so test scores may be slightly optimistic (data leakage).",
+            "Models use default settings with no hyperparameter tuning.",
+            "Scores come from a single train/test split plus 5-fold cross-validation.",
+        ],
+        "evaluation_summary": result.get("evaluation_summary", ""),
+        "target_skew": history[0].get("target_skew") if history else None,
+        "target_log_transformed": bool(history and history[0].get("target_log_transformed")),
+        "label_mapping": history[0].get("label_mapping") if history else None,
+        "majority_class_baseline_accuracy": history[0].get("majority_baseline") if history else None,
+    })
+
+
+def run_compulsory_steps(working_dir: str, target: str, task_type: str) -> None:
+    """All compulsory steps in one function, fixed order. The LLM cannot skip any."""
+    run_base_cleanup(working_dir, target)
+    run_categorical(working_dir, target)
+    run_numeric(working_dir, target, task_type)
+    run_training(working_dir, target, task_type)
