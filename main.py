@@ -126,8 +126,8 @@ async def run_pipeline(request: Request):
             "tool_drop_irrelevant_columns": tool_drop_irrelevant_columns,
         }
         primary = ChatGroq(model="openai/gpt-oss-120b", temperature=0).bind_tools(optional_tools).with_retry(stop_after_attempt=3)
-        backup1 = ChatGroq(model="openai/gpt-oss-20b", temperature=0).bind_tools(optional_tools).with_retry(stop_after_attempt=3)
-        backup2 = ChatGroq(model="qwen/qwen3.8-27b", temperature=0).bind_tools(optional_tools).with_retry(stop_after_attempt=3)
+        backup1 = ChatGroq(model="qwen/qwen3.8-27b", temperature=0).bind_tools(optional_tools).with_retry(stop_after_attempt=3)
+        backup2 = ChatGroq(model="openai/gpt-oss-20b", temperature=0).bind_tools(optional_tools).with_retry(stop_after_attempt=3)
         agent_llm = primary.with_fallbacks([backup1, backup2])
 
         system_instruction = (

@@ -2,13 +2,6 @@ import os
 import json
 from typing import Literal, Dict, Any
 
-from dotenv import load_dotenv
-load_dotenv()
-
-# LLM model,observability imports
-from langchain_groq import ChatGroq
-llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.3)
-
 from backend.graph.state import AgentState
 from backend.tools.ml_models import train_and_evaluate_models, MODELS
 
@@ -22,10 +15,21 @@ def model_training_node(state: AgentState) -> Dict[str, Any]:
         "train_acc": result['training_accuracy'],
         "test_acc": result['testing_accuracy'],
         "cv_score": result['cross_val_score'],
+        "cv_std": result['cv_std'],
+        "metric": result['metric'],
+        "test_accuracy_plain": result['test_accuracy_plain'],
+        "per_class": result['per_class'],
         "target_skew": result['target_skew'],
         "target_log_transformed": result['target_log_transformed'],
         "label_mapping": result['label_mapping'],
         "majority_baseline": result['majority_baseline'],
+        "imbalanced": result['imbalanced'],
+        "minority_share": result['minority_share'],
+        "minority_count": result['minority_count'],
+        "class_weighting_used": result['class_weighting_used'],
+        "metric_baseline": result['metric_baseline'],
+        "class_counts_train": result['class_counts_train'],
+        "class_counts_test": result['class_counts_test'],
     }
     return {"model_history": state.get('model_history', []) + [model_result]}
 
@@ -54,19 +58,8 @@ def evaluation_node(state: AgentState) -> Dict[str, Any]:
     history = state.get('model_history', [])
     if not history:
         raise ValueError("No model history available to evaluate.")
-
     best_entry = max(history, key=lambda x: x.get('cv_score', 0))
-    best_model_name = best_entry['model_name']
-    
-    prompt = f"""Analyze these model performance metrics: {history}.
-            1. Identify if any model shows signs of overfitting or underfitting.
-            2. Explain why {best_model_name} is the best model based on the balance of testing accuracy and cross-validation score.
-            """
-    try:
-        summary = llm.invoke(prompt).content
-    except Exception as e:
-        summary = f"LLM evaluation failed: {e}"
-    return {"model_name": best_model_name, "evaluation_summary": summary}
+    return {"model_name": best_entry['model_name'], "evaluation_summary": ""}
 
 
 def export_node(state: AgentState) -> Dict[str, Any]:

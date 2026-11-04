@@ -97,22 +97,49 @@ def build_summary(report: dict) -> str:
 
     num = steps.get("tool_process_and_reduce_numeric_features")
     if num:
-        capped = num.get("outlier_values_capped", 0)
+        capped = num.get("outlier_values_capped_total", 0)
         lines.append(f"- Numeric step: {capped} outlier values capped (rows kept), {len(num['columns_removed'])} columns removed, final {num['shape_after']['columns']} columns.")
+        for reason, cols in num.get("columns_removed_by_reason", {}).items():
+            if cols:
+                lines.append(f"- Removed because {reason}: {', '.join(cols)}.")
     train = steps.get("train_and_evaluate_models")
     if train:
-        metric = "R2" if train["task_type"] == "regression" else "accuracy"
+        metric_names = {"r2_score": "R2", "balanced_accuracy": "balanced accuracy", "accuracy": "accuracy"}
+        metric = metric_names.get(train.get("metric"), "accuracy")
         lines.append(f"- Task: {train['task_type']}, target: {train['target']}, metric: {metric}.")
         if train.get("target_log_transformed"):
             lines.append(f"- Target was highly skewed (skew {train['target_skew']:.1f}), so models were trained on its log and predictions converted back.")
         if train.get("label_mapping"):
             mapping_text = ", ".join(f"{k} = {v}" for k, v in train["label_mapping"].items())
             lines.append(f"- Class labels used by the models: {mapping_text}.")
-        if train.get("majority_class_baseline_accuracy") is not None:
-            lines.append(f"- Baseline: always guessing the most common class scores {train['majority_class_baseline_accuracy']:.3f} accuracy, so models should beat this.")
+
+        if train["task_type"] == "classification":
+            if train.get("class_counts_train"):
+                tr = ", ".join(f"{k}: {v}" for k, v in train["class_counts_train"].items())
+                te = ", ".join(f"{k}: {v}" for k, v in train["class_counts_test"].items())
+                lines.append(f"- Class counts in training set: {tr}. In test set: {te}.")
+            if train.get("imbalanced"):
+                lines.append(f"- Data is imbalanced: the smallest class is {train['minority_share'] * 100:.1f}% of the rows. Class weighting was used so rare classes count more.")
+                lines.append(f"- Because of this, scores below are balanced accuracy (average recall over the classes). Random guessing scores {train['metric_baseline']:.3f} on this metric.")
+                lines.append(f"- Plain accuracy of always guessing the most common class is {train['majority_class_baseline_accuracy']:.3f}, so plain accuracy alone is misleading here.")
+                if train.get("minority_count") is not None and train["minority_count"] < 50:
+                    lines.append(f"- Warning: the smallest class has only {train['minority_count']} rows, so all scores are noisy.")
+            elif train.get("majority_class_baseline_accuracy") is not None:
+                lines.append(f"- Baseline: always guessing the most common class scores {train['majority_class_baseline_accuracy']:.3f} accuracy, so models should beat this.")
+
         for m in train["model_results"]:
-            lines.append(f"- {m['model_name']}: train {m['train_acc']:.3f}, test {m['test_acc']:.3f}, CV {m['cv_score']:.3f}")
-        lines.append(f"- Best model: {train['best_model']} (highest cross-validation score).")
+            line = f"- {m['model_name']}: train {m['train_acc']:.3f}, test {m['test_acc']:.3f}, CV {m['cv_score']:.3f} (CV std {m['cv_std']:.3f}, lower std = more stable)"
+            if train.get("imbalanced") and m.get("test_accuracy_plain") is not None:
+                line += f", plain test accuracy {m['test_accuracy_plain']:.3f}"
+            lines.append(line)
+        lines.append(f"- Best model: {train['best_model']} (highest cross-validation {metric}).")
+
+        best = next((m for m in train["model_results"] if m["model_name"] == train["best_model"]), None)
+        if best and best.get("per_class"):
+            lines.append(f"- Per-class test results for {train['best_model']}:")
+            for cls, v in best["per_class"].items():
+                lines.append(f"  - class '{cls}' ({v['test_rows']} test rows): precision {v['precision']:.3f}, recall {v['recall']:.3f}, F1 {v['f1']:.3f}")
+
         lines.append("- Note: preprocessing was fitted on the full dataset before the split, so test scores may be slightly optimistic.")
 
     lines.append("Ask me anything about these results below.")
@@ -230,6 +257,7 @@ def run_numeric(working_dir: str, target: str, task_type: str) -> None:
         "outlier_rows_dropped_by_column": outlier_log.get("rows_dropped_by_column", {}),
         "outlier_values_capped_total": sum(capped.values()),
         "columns_removed": sorted(cols_before - set(df.columns)),
+        "columns_removed_by_reason": outlier_log.get("removed_columns_by_reason", {}),
         "kept_columns": list(df.columns),
         "k_features_limit": 10,
         "pca_used": False,
@@ -251,6 +279,7 @@ def run_training(working_dir: str, target: str, task_type: str) -> None:
         "export_path": None,
     })
     history = result.get("model_history", [])
+    first = history[0] if history else {}
     log_step(working_dir, "train_and_evaluate_models", {
         "task_type": task_type,
         "target": target,
@@ -259,19 +288,26 @@ def run_training(working_dir: str, target: str, task_type: str) -> None:
         "models_evaluated": len(history),
         "model_results": history,
         "best_model": result.get("model_name", "Unknown"),
-        "best_model_selected_by": "highest cross-validation score",
+        "best_model_selected_by": f"highest cross-validation score ({first.get('metric', 'accuracy')})",
         "known_limitations": [
             "Preprocessing (scaling, outlier handling, feature selection, missing-value filling) was fitted on the full dataset before the train/test split, so test scores may be slightly optimistic (data leakage).",
             "Models use default settings with no hyperparameter tuning.",
             "Scores come from a single train/test split plus 5-fold cross-validation.",
         ],
         "evaluation_summary": result.get("evaluation_summary", ""),
-        "target_skew": history[0].get("target_skew") if history else None,
-        "target_log_transformed": bool(history and history[0].get("target_log_transformed")),
-        "label_mapping": history[0].get("label_mapping") if history else None,
-        "majority_class_baseline_accuracy": history[0].get("majority_baseline") if history else None,
+        "target_skew": first.get("target_skew"),
+        "target_log_transformed": bool(first.get("target_log_transformed")),
+        "label_mapping": first.get("label_mapping"),
+        "majority_class_baseline_accuracy": first.get("majority_baseline"),
+        "metric": first.get("metric"),
+        "imbalanced": bool(first.get("imbalanced")),
+        "minority_share": first.get("minority_share"),
+        "minority_count": first.get("minority_count"),
+        "class_weighting_used": bool(first.get("class_weighting_used")),
+        "metric_baseline": first.get("metric_baseline"),
+        "class_counts_train": first.get("class_counts_train"),
+        "class_counts_test": first.get("class_counts_test"),
     })
-
 
 def run_compulsory_steps(working_dir: str, target: str, task_type: str) -> None:
     """All compulsory steps in one function, fixed order. The LLM cannot skip any."""
