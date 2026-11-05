@@ -2,3 +2,5 @@ venv/
 .env
 __pycache__/
 push.bat
+/tests
+/tests/make_tests.py

@@ -21,36 +21,11 @@ def drop_empty_and_null_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # 1.2 Date/time Features Preprocessing
-def drop_datetime_columns(df: pd.DataFrame, sample_size: int = 5, threshold: float = 0.8) -> pd.DataFrame:
-    """
-    Intelligently detects and drops date, time, timestamp, or duration columns 
-    by checking if sample values parse successfully into datetimes using pd.to_datetime.
-    """
-    df = df.copy()
-    drop_cols = []
-    for col in df.columns:
-        col_lower = str(col).lower()
-        # 1. Quick name check for explicit timestamp/date keywords
-        if any(kw in col_lower for kw in ['timestamp', 'datetime', 'dob']):
-            drop_cols.append(col)
-            continue
-        # 2. Sample-based parsing check for object/string or numeric date columns
-        sample = df[col].dropna().head(sample_size)
-        if len(sample) == 0:
-            continue
-        try:
-            # Attempt parsing sample values with errors='coerce' (invalid dates become NaT)
-            parsed = pd.to_datetime(sample, errors='coerce')
-            success_ratio = parsed.notna().mean()
-            # If a high percentage of the sample parses successfully as a date, drop it
-            if success_ratio >= threshold:
-                drop_cols.append(col)
-        except Exception:
-            # If pd.to_datetime fails entirely on the sample type, it's safe (not a date)
-            continue
-    if drop_cols:
-        df = df.drop(columns=list(set(drop_cols)))
-    return df
+def drop_datetime_columns(df: pd.DataFrame, date_column: Optional[str] = None, target: Optional[str] = None) -> pd.DataFrame:
+    """Drops the date/time column chosen by the user. Never drops the target."""
+    if not date_column or date_column == "None" or date_column == target or date_column not in df.columns:
+        return df
+    return df.drop(columns=[date_column])
 
 #1.3 handle infinite values
 def handle_infinite_values(df):

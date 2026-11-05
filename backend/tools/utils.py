@@ -87,6 +87,14 @@ def build_summary(report: dict) -> str:
     if irr:
         lines.append(f"- Irrelevant columns dropped: {', '.join(irr['dropped_columns']) or 'none'}.")
 
+    idc = steps.get("tool_drop_id_columns")
+    if idc:
+        lines.append(f"- ID columns dropped: {', '.join(idc['dropped_columns']) or 'none'}.")
+
+    adt = steps.get("tool_drop_auto_date_columns")
+    if adt:
+        lines.append(f"- Date/time columns auto-detected and dropped: {', '.join(adt['dropped_columns']) or 'none'}.")
+        
     sent = steps.get("tool_extract_text_sentiment")
     if sent:
         lines.append(f"- Text column '{sent['text_column']}' converted to a sentiment score.")

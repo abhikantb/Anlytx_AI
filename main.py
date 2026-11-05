@@ -38,30 +38,23 @@ async def processing_data(request: Request):
 
 
 # ------------------- 2. OPTIONAL TOOLS (the LLM decides if they are needed) ------------------- #
+
 @mcp.tool()
-def tool_drop_datetime_columns(working_dir: str, target: Optional[str] = None) -> Dict[str, Any]:
-    """Detects and drops date/time columns if identified as non-predictive timestamps. Never drops the target."""
+def tool_drop_id_columns(id_cols: List[str], working_dir: str, target: Optional[str] = None) -> Dict[str, Any]:
+    """Drops ID columns (row numbers, customer/account codes, any column that only identifies a row). Judge by the sample values and unique_ratio, not only the column name. Never drops the target."""
     try:
         df = pd.read_csv(os.path.join(working_dir, "working_dataset.csv"))
-        initial_cols = df.columns.tolist()
-        target_series = None
-        if target and target in df.columns:
-            target_series = df[target]
-            df = df.drop(columns=[target])
-        df = drop_datetime_columns(df)
-        if target_series is not None:
-            df[target] = target_series.values
-        dropped = [c for c in initial_cols if c not in df.columns]
+        existing_cols = [c for c in id_cols if c in df.columns and c != target]
+        df = df.drop(columns=existing_cols)
         save_step_output(df, working_dir)
-        log_step(working_dir, "tool_drop_datetime_columns", {
-            "dropped_columns": dropped,
+        log_step(working_dir, "tool_drop_id_columns", {
+            "dropped_columns": existing_cols,
             "shape_after": {"rows": df.shape[0], "columns": df.shape[1]},
-            "actions": "dropped columns that look like dates or timestamps (they rarely help prediction)",
+            "actions": "dropped ID columns chosen by the agent after looking at the sample values",
         })
-        return {"status": "success", "dropped_columns": dropped}
+        return {"status": "success", "dropped": existing_cols}
     except Exception as e:
-        return {"error": f"Failed to drop datetime columns: {str(e)}"}
-
+        return {"error": f"Failed to drop ID columns: {str(e)}"}
 
 @mcp.tool()
 def tool_extract_text_sentiment(text_col: str, working_dir: str) -> Dict[str, Any]:
@@ -84,7 +77,7 @@ def tool_extract_text_sentiment(text_col: str, working_dir: str) -> Dict[str, An
 
 @mcp.tool()
 def tool_drop_irrelevant_columns(cols_to_drop: List[str], working_dir: str, target: Optional[str] = None) -> Dict[str, Any]:
-    """Drops useless columns such as IDs, names, hashes, links or unneeded text. Never drops the target."""
+    """Drops useless text columns such as names, hashes, links or unneeded long text. Do not use for ID columns. Never drops the target."""
     try:
         df = pd.read_csv(os.path.join(working_dir, "working_dataset.csv"))
         existing_cols = [c for c in cols_to_drop if c in df.columns and c != target]
@@ -99,6 +92,22 @@ def tool_drop_irrelevant_columns(cols_to_drop: List[str], working_dir: str, targ
     except Exception as e:
         return {"error": f"Failed to drop irrelevant columns: {str(e)}"}
 
+@mcp.tool()
+def tool_drop_auto_date_columns(date_cols: List[str], working_dir: str, target: Optional[str] = None) -> Dict[str, Any]:
+    """Drops date/time columns (dates, timestamps, times of day) that are still in the data. Judge by the sample values, not only the column name. Plain numbers like age, price, visits, or day-of-week counts are NOT dates, keep them. Keep the column if unsure. Never drops the target."""
+    try:
+        df = pd.read_csv(os.path.join(working_dir, "working_dataset.csv"))
+        existing_cols = [c for c in date_cols if c in df.columns and c != target]
+        df = df.drop(columns=existing_cols)
+        save_step_output(df, working_dir)
+        log_step(working_dir, "tool_drop_auto_date_columns", {
+            "dropped_columns": existing_cols,
+            "shape_after": {"rows": df.shape[0], "columns": df.shape[1]},
+            "actions": "dropped leftover date/time columns chosen by the agent after looking at the sample values",
+        })
+        return {"status": "success", "dropped": existing_cols}
+    except Exception as e:
+        return {"error": f"Failed to drop date columns: {str(e)}"}
 
 # ------------------- 3. MAIN PIPELINE ROUTE ------------------- #
 @mcp.custom_route("/api/run-pipeline", methods=["POST"])
@@ -108,20 +117,36 @@ async def run_pipeline(request: Request):
         working_dir = body2["working_dir"]
         task_type = body2["task_type"]
         target = body2["target"]
+        date_column = body2.get("date_column")
+
+        # Step 0: drop the date/time column chosen by the user (preprocessing function does the work)
+        df = pd.read_csv(os.path.join(working_dir, "working_dataset.csv"))
+        df_after = drop_datetime_columns(df, date_column, target)
+        dropped_dt = [c for c in df.columns if c not in df_after.columns]
+        if dropped_dt:
+            save_step_output(df_after, working_dir)
+            log_step(working_dir, "tool_drop_datetime_columns", {
+                "dropped_columns": dropped_dt,
+                "shape_after": {"rows": df_after.shape[0], "columns": df_after.shape[1]},
+                "actions": "dropped the date/time column chosen by the user",
+            })
+        df = df_after
 
         # Step A: code inspects the dataset (always)
         info = inspect_dataset(working_dir)
         short_info = {
             "shape": info["shape"],
             "dtypes": info["dtypes"],
+            "unique_ratio": {c: round(df[c].nunique() / len(df), 2) for c in df.columns},
             "columns_with_missing_pct": {c: v for c, v in info["missing_pct"].items() if v > 0},
-            "sample_rows": [{k: str(v)[:80] for k, v in row.items()} for row in info["sample_data"][:3]],
+            "sample_rows": [{k: str(v)[:80] for k, v in row.items()} for row in info["sample_data"][:5]],
         }
 
         # Step B: the LLM only decides the OPTIONAL steps
-        optional_tools = [tool_drop_datetime_columns, tool_extract_text_sentiment, tool_drop_irrelevant_columns]
+        optional_tools = [tool_drop_id_columns, tool_drop_auto_date_columns, tool_extract_text_sentiment, tool_drop_irrelevant_columns]
         tool_map = {
-            "tool_drop_datetime_columns": tool_drop_datetime_columns,
+            "tool_drop_id_columns": tool_drop_id_columns,
+            "tool_drop_auto_date_columns": tool_drop_auto_date_columns,
             "tool_extract_text_sentiment": tool_extract_text_sentiment,
             "tool_drop_irrelevant_columns": tool_drop_irrelevant_columns,
         }
@@ -133,9 +158,14 @@ async def run_pipeline(request: Request):
         system_instruction = (
             "You are an expert AutoML data scientist. You get a summary of a dataset.\n"
             "Call a tool ONLY if the data needs it:\n"
+            "- tool_drop_id_columns: for ID columns (row numbers, customer or account codes). Judge by the sample "
+            "values and unique_ratio, not only the name. Do NOT drop decimal numbers like price or amounts, "
+            "even if all their values are unique. If unsure, keep the column.\n"
+            "- tool_drop_auto_date_columns: ONLY for columns that still hold real dates or times in the sample values "
+            "(like calendar dates or timestamps). Plain numbers like age, price, visits or day counts are NOT dates. "
+            "If unsure, keep the column.\n"
             "- tool_extract_text_sentiment: for a long free-text column (reviews, comments, sentences).\n"
-            "- tool_drop_irrelevant_columns: for useless columns (IDs, names, links, hashes).\n"
-            "- tool_drop_datetime_columns: if date or time columns exist.\n"
+            "- tool_drop_irrelevant_columns: for other useless text columns (names, links, hashes).\n"
             "Never touch the target column. Cleaning, encoding, scaling and training run automatically "
             "after you, so do not do them. When you are finished, or if nothing is needed, reply with the single word DONE."
         )
