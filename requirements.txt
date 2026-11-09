@@ -3,7 +3,7 @@ numpy
 scikit-learn
 matplotlib
 seaborn
-langgraph
+# langgraph
 langchain
 langchain_groq
 ollama
@@ -13,3 +13,4 @@ groq
 uv
 fastmcp
 vaderSentiment
+imbalanced-learn

@@ -7,7 +7,7 @@ from backend.tools.preprocessing import (
     run_base_preprocessing,    run_categorical_preprocessing,
     run_numerical_preprocessing,     convert_numeric_strings,
 )
-
+from backend.tools.ml_models import run_all_models, get_feature_importance
 
 def create_working_dir(filename: str) -> str:
     """Generates a unique project working directory under data/ and creates it."""
@@ -94,7 +94,7 @@ def build_summary(report: dict) -> str:
     adt = steps.get("tool_drop_auto_date_columns")
     if adt:
         lines.append(f"- Date/time columns auto-detected and dropped: {', '.join(adt['dropped_columns']) or 'none'}.")
-        
+
     sent = steps.get("tool_extract_text_sentiment")
     if sent:
         lines.append(f"- Text column '{sent['text_column']}' converted to a sentiment score.")
@@ -110,11 +110,15 @@ def build_summary(report: dict) -> str:
         for reason, cols in num.get("columns_removed_by_reason", {}).items():
             if cols:
                 lines.append(f"- Removed because {reason}: {', '.join(cols)}.")
+
     train = steps.get("train_and_evaluate_models")
     if train:
         metric_names = {"r2_score": "R2", "balanced_accuracy": "balanced accuracy", "accuracy": "accuracy"}
         metric = metric_names.get(train.get("metric"), "accuracy")
         lines.append(f"- Task: {train['task_type']}, target: {train['target']}, metric: {metric}.")
+        # features kept by feature selection inside the Pipeline (chosen from training rows only)
+        if train.get("selected_features"):
+            lines.append(f"- Features kept by feature selection (chosen using training rows only): {', '.join(train['selected_features'])}.")
         if train.get("target_log_transformed"):
             lines.append(f"- Target was highly skewed (skew {train['target_skew']:.1f}), so models were trained on its log and predictions converted back.")
         if train.get("label_mapping"):
@@ -127,7 +131,7 @@ def build_summary(report: dict) -> str:
                 te = ", ".join(f"{k}: {v}" for k, v in train["class_counts_test"].items())
                 lines.append(f"- Class counts in training set: {tr}. In test set: {te}.")
             if train.get("imbalanced"):
-                lines.append(f"- Data is imbalanced: the smallest class is {train['minority_share'] * 100:.1f}% of the rows. Class weighting was used so rare classes count more.")
+                lines.append(f"- Data is imbalanced: the smallest class is {train['minority_share'] * 100:.1f}% of the rows. Rare classes were oversampled in the training rows only (test rows were not touched).")
                 lines.append(f"- Because of this, scores below are balanced accuracy (average recall over the classes). Random guessing scores {train['metric_baseline']:.3f} on this metric.")
                 lines.append(f"- Plain accuracy of always guessing the most common class is {train['majority_class_baseline_accuracy']:.3f}, so plain accuracy alone is misleading here.")
                 if train.get("minority_count") is not None and train["minority_count"] < 50:
@@ -142,13 +146,21 @@ def build_summary(report: dict) -> str:
             lines.append(line)
         lines.append(f"- Best model: {train['best_model']} (highest cross-validation {metric}).")
 
+        # feature importance of the best model (score drop when the column is shuffled in the test rows)
+        if train.get("top_features"):
+            top_text = ", ".join(f"{t['feature']} ({t['score_drop']:.3f})" for t in train["top_features"])
+            lines.append(f"- Most important features for {train['best_model']} (score drop when the column is shuffled in the test rows, bigger = more important): {top_text}.")
+
         best = next((m for m in train["model_results"] if m["model_name"] == train["best_model"]), None)
         if best and best.get("per_class"):
             lines.append(f"- Per-class test results for {train['best_model']}:")
             for cls, v in best["per_class"].items():
                 lines.append(f"  - class '{cls}' ({v['test_rows']} test rows): precision {v['precision']:.3f}, recall {v['recall']:.3f}, F1 {v['f1']:.3f}")
 
-        lines.append("- Note: preprocessing was fitted on the full dataset before the split, so test scores may be slightly optimistic.")
+        # known limitations, so the chat can explain them when the user asks
+        lines.append("- Known limitations of this report:")
+        for text in train.get("known_limitations", []):
+            lines.append(f"  - {text}")
 
     lines.append("Ask me anything about these results below.")
     return "\n".join(lines)
@@ -253,7 +265,7 @@ def run_numeric(working_dir: str, target: str, task_type: str) -> None:
     shape_before = df.shape
     cols_before = set(df.columns)
     outlier_log = {}
-    df = run_numerical_preprocessing(df, target_col=target, task_type=task_type, log=outlier_log)
+    df = run_numerical_preprocessing(df, target_col=target, log=outlier_log)
 
     save_step_output(df, working_dir)
     capped = outlier_log.get("values_capped_by_column", {})
@@ -268,25 +280,16 @@ def run_numeric(working_dir: str, target: str, task_type: str) -> None:
         "columns_removed_by_reason": outlier_log.get("removed_columns_by_reason", {}),
         "kept_columns": list(df.columns),
         "k_features_limit": 10,
-        "pca_used": False,
-        "actions": "dropped near-constant columns, removed or capped outliers (IQR), scaled with Yeo-Johnson, removed highly correlated columns (above 0.9), selected top features",
+        "actions": "dropped near-constant columns, removed or capped outliers (IQR), removed highly correlated columns (above 0.8). Scaling and feature selection run later inside the training Pipeline.",
     })
 
 
 def run_training(working_dir: str, target: str, task_type: str) -> None:
-    from backend.graph.workflow import app   # imported here to avoid a circular import
     df = _read_working(working_dir)
-    result = app.invoke({
-        "working_dir": working_dir,
-        "df": df,
-        "task_type": task_type,
-        "target": target,
-        "model_name": None,
-        "model_history": [],
-        "evaluation_summary": None,
-        "export_path": None,
-    })
-    history = result.get("model_history", [])
+    # train every model in MODELS and pick the best one by CV score
+    history, best_model = run_all_models(df, task_type, target)
+    # feature importance: which columns the best model depends on (measured on the test rows)
+    top_features = get_feature_importance(df, task_type, target, best_model)
     first = history[0] if history else {}
     log_step(working_dir, "train_and_evaluate_models", {
         "task_type": task_type,
@@ -295,14 +298,16 @@ def run_training(working_dir: str, target: str, task_type: str) -> None:
         "features_used": [c for c in df.columns if c != target],
         "models_evaluated": len(history),
         "model_results": history,
-        "best_model": result.get("model_name", "Unknown"),
+        "best_model": best_model,
         "best_model_selected_by": f"highest cross-validation score ({first.get('metric', 'accuracy')})",
         "known_limitations": [
-            "Preprocessing (scaling, outlier handling, feature selection, missing-value filling) was fitted on the full dataset before the train/test split, so test scores may be slightly optimistic (data leakage).",
-            "Models use default settings with no hyperparameter tuning.",
-            "Scores come from a single train/test split plus 5-fold cross-validation.",
+            "Outlier limits, missing-value filling, rare-category grouping, low-variance and correlation removal were calculated on the full dataset before the train/test split, so test scores may be slightly optimistic (small data leakage). Scaling, feature selection and oversampling used training rows only.",
+            "Models use default settings with no hyperparameter tuning, and only 3 algorithms are tried.",
+            "Scores come from a single random train/test split plus 5-fold cross-validation on the training rows. Time order is not respected, so this is not a forecasting setup.",
+            "Feature importance shows which columns the model relies on, not which columns cause the target.",
+            "Oversampling copies existing rare-class rows, it does not create new data.",
+            "Columns that are almost the same as another column (correlation above 0.8) are removed, even if they were useful.",
         ],
-        "evaluation_summary": result.get("evaluation_summary", ""),
         "target_skew": first.get("target_skew"),
         "target_log_transformed": bool(first.get("target_log_transformed")),
         "label_mapping": first.get("label_mapping"),
@@ -311,7 +316,9 @@ def run_training(working_dir: str, target: str, task_type: str) -> None:
         "imbalanced": bool(first.get("imbalanced")),
         "minority_share": first.get("minority_share"),
         "minority_count": first.get("minority_count"),
-        "class_weighting_used": bool(first.get("class_weighting_used")),
+        "oversampling_used": bool(first.get("oversampling_used")),
+        "selected_features": first.get("selected_features"),
+        "top_features": top_features,
         "metric_baseline": first.get("metric_baseline"),
         "class_counts_train": first.get("class_counts_train"),
         "class_counts_test": first.get("class_counts_test"),

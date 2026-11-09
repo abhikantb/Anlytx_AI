@@ -13,28 +13,40 @@ how accurate they are. Then **chat with the results** in plain English. No codin
 2. Upload a CSV or Excel file and choose the task:
    - **Regression**: predict a number (price, sales, age...)
    - **Classification**: predict a category (yes/no, positive/negative...)
-3. Pick the **target column** (the one you want to predict) and click **Submit & Run Pipeline**.
-4. Read the report, then ask questions, for example:
-   - "How many missing values were there?"
-   - "Which model was best and why?"
-   - "Which columns were removed or encoded?"
-   - "What are the limitations of these results?"
-5. Choose **End chat** when you're done.
+3. Pick the **target column** (the one you want to predict). If your data has a
+   **date/time column**, pick it too (it will be removed); otherwise leave it as **None**.
+   Then click **Submit & Run Pipeline**.
+4. Read the report, then choose what to do next:
+   - **Ask a question**, for example:
+     - "How many missing values were there?"
+     - "Which model was best and why?"
+     - "Which columns were removed or encoded?"
+     - "What are the limitations of these results?"
+   - **End chat** if you only wanted the report.
+5. After each answer, choose **Ask a question** again or **End chat** when you're done.
 
 ## What it does automatically
 
 - Converts number-like text (`4,25,000`, `45,000 kms`) into real numbers
 - Removes rows with an empty target and fills other missing values
-- Drops date and ID-like columns, and turns review text into a sentiment score (English only)
+- Drops the date column you picked, and also catches leftover date/time columns by itself
+- Drops ID-like columns (row numbers, customer or account codes) by looking at the sample values
+- Drops useless text columns (names, links, hashes) and turns review text into a sentiment score (English only)
 - Encodes text categories, caps extreme values, scales features, removes duplicated information
 - Trains and compares 3 models (RandomForest, GradientBoosting, and Ridge or LogisticRegression)
+- Handles imbalanced classes with class weighting and shows per-class results
 - If the target is very skewed (like prices), trains on its log and converts results back
+- Stops with a clear error if a classification target has too many unique values (more than 20),
+  because it looks like a regression target
 
 ## How it works
 
 ```
 Browser -> n8n forms -> Python backend (FastMCP on Horizon)
-                          |- AI agent inspects the data and picks the cleaning tools
+                          |- Code inspects the data (columns, sample rows, unique ratios)
+                          |- AI agent picks only the optional cleaning tools
+                          |    (ID columns, leftover date columns, text/sentiment, irrelevant columns)
+                          |- Code always runs the compulsory steps (cleanup, encoding, scaling, training)
                           |- Each tool records what it did in report.json
                           |- 3 models are trained, best chosen by cross-validation
                           v
@@ -74,6 +86,9 @@ point both HTTP Request nodes to your Horizon link, set the pipeline node timeou
 - **Slight data leakage:** scaling, outlier limits and feature selection are fitted on the
   full dataset before the train/test split, so test scores may be slightly optimistic.
   The fix is a scikit-learn Pipeline fitted on training rows only.
+- **AI-based column detection:** ID and leftover date columns are judged by an AI model
+  from sample values. It keeps a column when unsure, so it may miss one, but it should not
+  drop useful columns. Picking the date column yourself is the most reliable option.
 - **Free-tier AI limits:** Groq's free plan has token limits. Retries and fallback models
   are built in, but heavy use can still hit them.
 - **Temporary storage:** files live in `/tmp` on the server and can be wiped on restart.
@@ -81,7 +96,7 @@ point both HTTP Request nodes to your Horizon link, set the pipeline node timeou
 
 ## Roadmap
 
-Fit preprocessing on training data only, add tuning and more models, show chat history,
-persist reports, and offer the cleaned dataset for download.
+Fit preprocessing on training data only, add tuning and more models, feature importance,
+show chat history, persist reports, a custom web UI, and offer the cleaned dataset for download.
 
 **Built with:** Python, FastMCP, LangChain, Groq, scikit-learn, pandas, VADER, n8n, Horizon.

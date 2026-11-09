@@ -1,5 +1,5 @@
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from functools import partial
 import numpy as np
 import re
 import os
@@ -221,22 +221,16 @@ def handle_outliers(df: pd.DataFrame, limit: float = 0.01, log: Optional[dict] =
             df[col] = df[col].clip(lower=low, upper=high)
     return df
 
-# 3.3 Scaling
+# 3.3 Scaling (returns the scaler, it is fitted later inside the Pipeline on training rows only)
 from sklearn.preprocessing import PowerTransformer
-def scale_numeric_features(X: pd.DataFrame) -> pd.DataFrame:
-    """Applies PowerTransformer (Yeo-Johnson) to stabilize variance and standardize all numeric features."""
-    X = X.copy()
-    if len(X.columns) > 0:
-        pt = PowerTransformer(method='yeo-johnson', standardize=True)
-        X_train, X_test = train_test_split(X, test_size=0.2, random_state=42)
-        pt.fit(X_train)
-        X[X.columns] = pt.transform(X[X.columns])
-    return X
+def get_scaler():
+    """Yeo-Johnson PowerTransformer to stabilize variance and standardize numeric features."""
+    return PowerTransformer(method='yeo-johnson', standardize=True)
 
 # -------------------4. Feature selection ------------------- #
 
 #4.1 remove highly correlated numerical features
-def remove_correlated_features(df, num_cols, threshold=0.9):
+def remove_correlated_features(df, num_cols, threshold=0.8):
     df = df.copy()
     corr_matrix = df[num_cols].corr().abs()
     drop_cols = set()
@@ -248,33 +242,12 @@ def remove_correlated_features(df, num_cols, threshold=0.9):
     df = df.drop(columns=list(drop_cols))
     return df
 
-# 4.2 feature selection
-from sklearn.feature_selection import SelectKBest, f_classif, f_regression
-def select_best_features(X, y, task_type, k: int = 10):
-    X = X.copy()
-    k_actual = min(k, X.shape[1])
-    if task_type == "classification":
-        selector = SelectKBest(score_func=f_classif, k=k_actual) # annova 
-    else:
-        selector = SelectKBest(score_func=f_regression, k=k_actual) # correlation
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    selector.fit(X_train, y_train)
-    X_new = selector.transform(X)
-    selected_cols = X.columns[selector.get_support()]
-    X_new = pd.DataFrame(X_new, columns=selected_cols, index=X.index)
-    return X_new
-
-# 4.3 apply PCA
-from sklearn.decomposition import PCA
-def apply_pca(X, n_components=0.95):
-    X = X.copy()
-    pca = PCA(n_components=n_components)
-    X_train, X_test = train_test_split(X, test_size=0.2, random_state=42)
-    pca.fit(X_train)
-    X_pca = pca.transform(X)
-    cols = [f'PC{i+1}' for i in range(X_pca.shape[1])]
-    X_pca = pd.DataFrame(X_pca, columns=cols, index=X.index)
-    return X_pca
+# 4.2 feature selection (returns the selector, it is fitted later inside the Pipeline on training rows only)
+from sklearn.feature_selection import SelectKBest, mutual_info_classif, mutual_info_regression
+def get_feature_selector(task_type, k: int = 10):
+    """Mutual information catches linear and nonlinear links between a column and the target."""
+    score_func = mutual_info_classif if task_type == "classification" else mutual_info_regression
+    return SelectKBest(score_func=partial(score_func, random_state=42), k=k)
 
 
 # ------------------- A. BASE Preprocessing FUNCTION ------------------- #
@@ -297,13 +270,13 @@ def run_categorical_preprocessing(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ------------------- C. Numerical Feature Engineering ------------------- #
-def run_numerical_preprocessing(df: pd.DataFrame, target_col: Optional[str] = None, task_type: Optional[str] = None, 
-                                k: int = 10, use_pca: bool = False, n_components: int = 5, log: Optional[dict] = None) -> pd.DataFrame:
-    """Sequential numerical pipeline: Drop Low Variance -> Handle Outliers -> Scale -> Remove Collinear -> Feature Selection / PCA."""
+def run_numerical_preprocessing(df: pd.DataFrame, target_col: Optional[str] = None, log: Optional[dict] = None) -> pd.DataFrame:
+    """Sequential numerical pipeline: Drop Low Variance -> Handle Outliers -> Remove Collinear.
+    Scaling and feature selection run inside the sklearn Pipeline (ml_models.py), fitted on training rows only."""
     df = df.copy()
     removed = {}   # reason -> list of removed column names
 
-    # C1. Separate features (X) and target (y) at the start
+    # Separate features (X) and target (y)
     if target_col and target_col in df.columns:
         y = df[target_col]
         X = df.drop(columns=[target_col])
@@ -311,36 +284,25 @@ def run_numerical_preprocessing(df: pd.DataFrame, target_col: Optional[str] = No
         y = None
         X = df
 
-    # C2. Process features only
     cols_before = set(X.columns)
     X = drop_low_variance(X)
     removed["almost constant (one value in 99%+ of rows)"] = sorted(cols_before - set(X.columns))
 
     X = handle_outliers(X, log=log)
 
-    # --- FIX: Synchronize y rows with X if handle_outliers dropped rows --- #
+    # Keep y rows in sync if handle_outliers dropped rows
     if y is not None:
         y = y.loc[X.index]
 
-    X = scale_numeric_features(X)
     if len(X.columns) > 1:
         cols_before = set(X.columns)
         X = remove_correlated_features(X, X.columns.tolist())
-        removed["highly correlated with another column (above 0.9)"] = sorted(cols_before - set(X.columns))
-
-    # C3. Apply Feature Selection or PCA on X using y
-    if y is not None and task_type:
-        cols_before = set(X.columns)
-        if use_pca and X.shape[1] > n_components:
-            X = apply_pca(X, n_components=n_components)
-        elif X.shape[1] > k:
-            X = select_best_features(X, y, task_type=task_type, k=k)
-            removed[f"not in the top {k} features by statistical test with the target"] = sorted(cols_before - set(X.columns))
+        removed["highly correlated with another column (above 0.8)"] = sorted(cols_before - set(X.columns))
 
     if log is not None:
         log["removed_columns_by_reason"] = removed
 
-    # C4. Re-attach target column back to dataframe
+    # Re-attach target column
     if y is not None:
         X[target_col] = y
     return X
