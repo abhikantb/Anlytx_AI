@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anlytx AI</title>
+<style>
+  /* colors and font used everywhere (change them here only) */
+  :root {
+    --ink: #14303a;
+    --soft-text: #5a6f78;
+    --main: #0b6a8a;
+    --main-dark: #08536d;
+    --mint: #c9f2e6;
+    --paper: #f3f8f9;
+    --card: #ffffff;
+    --line: #d5e3e8;
+    --bad: #b3261e;
+    font-family: "Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); }
+
+  /* page width: one column, centered, works on phone and laptop */
+  .page { max-width: 640px; margin: 0 auto; padding: 20px 16px 60px; }
+
+  /* top bar with the name */
+  .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  .name { font-size: 22px; font-weight: 700; color: var(--main); }
+
+  /* step bar: Upload, Target, Results, Chat */
+  .steps { display: flex; justify-content: space-between; margin-bottom: 28px; }
+  .step { flex: 1; text-align: center; font-size: 13px; color: var(--soft-text); }
+  .step .dot { width: 30px; height: 30px; margin: 0 auto 6px; border-radius: 50%; background: var(--line); display: grid; place-items: center; font-weight: 700; }
+  .step.active { color: var(--main); font-weight: 700; }
+  .step.active .dot { background: var(--main); color: #fff; }
+  .step.done .dot { background: var(--mint); color: var(--main-dark); }
+
+  h1 { font-size: 30px; margin: 0 0 6px; }
+  .hint { color: var(--soft-text); margin: 0 0 22px; line-height: 1.5; }
+  h2 { font-size: 18px; margin: 28px 0 10px; }
+
+  /* only one screen is visible at a time */
+  .screen { display: none; }
+  .screen.show { display: block; }
+
+  /* drop box for the file */
+  .drop { background: var(--card); border: 2px dashed var(--line); border-radius: 18px; padding: 30px 20px; text-align: center; cursor: pointer; }
+  .drop.over { border-color: var(--main); background: #eaf6fa; }
+  .drop b { display: block; font-size: 18px; margin-bottom: 6px; }
+  .drop span { color: var(--soft-text); font-size: 14px; }
+  .file-box { margin-top: 12px; padding: 12px 14px; background: var(--mint); border-radius: 12px; font-size: 14px; display: none; }
+
+  /* task type choice */
+  .choice { display: block; background: var(--card); border: 2px solid var(--line); border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; cursor: pointer; }
+  .choice input { margin-right: 10px; accent-color: var(--main); }
+  .choice.picked { border-color: var(--main); }
+  .choice small { display: block; margin: 4px 0 0 26px; color: var(--soft-text); line-height: 1.4; }
+
+  /* Target screen: file info and dropdowns */
+  .file-info { display: inline-block; padding: 8px 14px; background: var(--mint); border-radius: 999px; font-size: 14px; margin-bottom: 18px; }
+  .field { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin-bottom: 14px; }
+  .field label { display: block; font-weight: 700; margin-bottom: 4px; }
+  .field .note { color: var(--soft-text); font-size: 13px; margin: 0 0 10px; line-height: 1.4; }
+  select { width: 100%; padding: 12px; font-size: 16px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); }
+
+  /* buttons and messages */
+  button.go { width: 100%; margin-top: 18px; padding: 15px; border: 0; border-radius: 14px; background: var(--main); color: #fff; font-size: 17px; font-weight: 700; cursor: pointer; }
+  button.go:hover:not(:disabled) { background: var(--main-dark); }
+  button.go:disabled { background: #9db9c3; cursor: not-allowed; }
+  button.back { margin-top: 12px; padding: 10px 0; border: 0; background: none; color: var(--main); font-size: 15px; font-weight: 700; cursor: pointer; }
+  button:focus-visible, .drop:focus-visible, .choice:focus-within, select:focus-visible { outline: 3px solid var(--main); outline-offset: 2px; }
+  .message { margin-top: 14px; padding: 12px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; display: none; }
+  .message.error { display: block; background: #fdecea; color: var(--bad); }
+  .message.ok { display: block; background: var(--mint); }
+
+  /* running box with a spinner (the pipeline can take a minute or more) */
+  .running { display: none; align-items: center; gap: 14px; margin-top: 18px; padding: 16px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
+  .running.show { display: flex; }
+  .spinner { width: 28px; height: 28px; flex: none; border: 4px solid var(--line); border-top-color: var(--main); border-radius: 50%; animation: turn 0.9s linear infinite; }
+  @keyframes turn { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+  /* Results screen: white cards, model table, feature bars, open/close boxes */
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin-bottom: 14px; }
+  .card h3 { margin: 0 0 4px; font-size: 18px; }
+  .card .note { color: var(--soft-text); font-size: 13px; line-height: 1.45; margin: 0 0 12px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 10px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; }
+  th { color: var(--soft-text); font-weight: 600; }
+  tr.best td { background: var(--mint); font-weight: 700; }
+  .bar-row { margin-bottom: 12px; font-size: 14px; }
+  .bar-label { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 4px; overflow-wrap: anywhere; }
+  .bar-track { height: 10px; background: var(--line); border-radius: 999px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--main); border-radius: 999px; }
+  details.card summary { cursor: pointer; font-weight: 700; font-size: 16px; }
+  details.card summary:focus-visible { outline: 3px solid var(--main); outline-offset: 4px; }
+  .summary-text { margin-top: 12px; white-space: pre-wrap; line-height: 1.55; font-size: 14px; overflow-wrap: anywhere; }
+  details.card ul { margin: 12px 0 0; padding-left: 20px; line-height: 1.5; font-size: 14px; }
+  details.card li { margin-bottom: 8px; }
+
+  /* Target screen: sample rows box (open/close) */
+  details.preview summary { list-style: none; display: flex; align-items: center; gap: 10px; color: var(--main); }
+  details.preview summary::-webkit-details-marker { display: none; }
+  details.preview summary svg { flex: none; }
+  details.preview .toggle { margin-left: auto; font-size: 13px; font-weight: 600; color: var(--soft-text); }
+  details.preview .when-open, details.preview[open] .when-closed { display: none; }
+  details.preview[open] .when-open { display: inline; }
+  .preview-wrap { margin-top: 14px; overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+  .preview-wrap table { font-size: 13px; }
+  .preview-wrap th, .preview-wrap td { text-align: left; padding: 10px 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  .preview-wrap th { background: var(--paper); }
+  .preview-wrap td { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+  .preview-wrap tr:last-child td { border-bottom: 0; }
+
+  /* Screen 4: chat box, messages, chips and input */
+  .chat-header-actions { display: flex; gap: 8px; }
+  .btn-outline { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 7px 12px; font-size: 13px; font-weight: 600; cursor: pointer; color: var(--ink); display: flex; align-items: center; gap: 6px; }
+  .btn-outline:hover { background: var(--paper); }
+  .btn-clear { color: var(--bad); border-color: #f7dcd9; background: #fff5f4; }
+  .btn-clear:hover { background: #fee8e6; }
+  
+  .chat-info-bar { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; font-size: 13px; color: var(--soft-text); margin-bottom: 14px; }
+  .chat-info-bar b { color: var(--ink); }
+
+  .chat-container { background: #fff; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; overflow: hidden; margin-bottom: 14px; }
+  .chat-stream { height: 380px; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; background: #fdfefe; }
+  
+  .chat-msg { display: flex; gap: 10px; max-width: 88%; }
+  .chat-msg.bot { align-self: flex-start; }
+  .chat-msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  
+  .chat-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--main); color: #fff; display: grid; place-items: center; flex: none; font-size: 14px; }
+  .chat-msg.user .chat-avatar { background: var(--soft-text); }
+  
+  .chat-bubble { padding: 12px 14px; border-radius: 14px; font-size: 14px; line-height: 1.5; background: #f4f8fa; border: 1px solid var(--line); overflow-wrap: anywhere; }
+  .chat-msg.user .chat-bubble { background: var(--main); color: #fff; border-color: var(--main); }
+  .chat-msg-author { font-size: 12px; color: var(--soft-text); margin-bottom: 4px; display: flex; justify-content: space-between; gap: 12px; }
+  .chat-msg.user .chat-msg-author { color: #d7eef5; }
+
+  /* chips for suggested questions */
+  .chat-suggestions { padding: 10px 14px; border-top: 1px solid var(--line); background: #fafdfd; }
+  .chat-suggestions-title { font-size: 12px; font-weight: 700; color: var(--main); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .chat-chips-wrap { display: flex; flex-wrap: wrap; gap: 6px; max-height: 90px; overflow-y: auto; }
+  .chat-chip { background: #fff; border: 1px solid var(--line); border-radius: 20px; padding: 5px 12px; font-size: 12px; cursor: pointer; color: var(--ink); line-height: 1.3; }
+  .chat-chip:hover { border-color: var(--main); background: #f0f8fa; color: var(--main); }
+
+  /* chat input bar */
+  .chat-input-bar { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); background: #fff; }
+  .chat-input-bar input { flex: 1; padding: 10px 14px; font-size: 14px; border: 1px solid var(--line); border-radius: 10px; outline: none; }
+  .chat-input-bar input:focus { border-color: var(--main); }
+  .btn-send { background: var(--main); color: #fff; border: none; border-radius: 10px; padding: 0 16px; cursor: pointer; font-weight: 700; font-size: 14px; }
+  .btn-send:hover { background: var(--main-dark); }
+  .btn-send:disabled { background: #9db9c3; cursor: not-allowed; }
+  
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- top bar -->
+  <div class="top"><div class="name">Anlytx AI</div></div>
+
+  <!-- step bar: the page colors it as the user moves forward -->
+  <div class="steps">
+    <div class="step" id="step-1"><div class="dot">1</div>Upload</div>
+    <div class="step" id="step-2"><div class="dot">2</div>Target</div>
+    <div class="step" id="step-3"><div class="dot">3</div>Results</div>
+    <div class="step" id="step-4"><div class="dot">4</div>Chat</div>
+  </div>
+
+  <!-- SCREEN 1: upload the file and choose the task type -->
+  <section class="screen" id="screen-upload">
+    <h1>Upload your data</h1>
+    <p class="hint">Choose a CSV or Excel file. Anlytx cleans it, trains models and explains the results.</p>
+
+    <!-- drop box: click it or drop a file on it -->
+    <div class="drop" id="drop-box" tabindex="0" role="button" aria-label="Choose a file">
+      <b>Drop your file here, or click to choose</b>
+      <span>.csv, .xlsx or .xls, up to 50 MB</span>
+    </div>
+    <input type="file" id="file-input" accept=".csv,.xlsx,.xls" hidden>
+    <div class="file-box" id="file-box"></div>
+
+    <h2>What do you want to predict?</h2>
+    <label class="choice">
+      <input type="radio" name="task" value="classification">
+      <b>Classification</b>
+      <small>A category, like yes or no, or a type. Example: will a customer leave?</small>
+    </label>
+    <label class="choice">
+      <input type="radio" name="task" value="regression">
+      <b>Regression</b>
+      <small>A number, like a price or a count. Example: what will the sales be?</small>
+    </label>
+
+    <button class="go" id="upload-button" disabled>Upload and continue</button>
+    <div class="message" id="upload-message"></div>
+  </section>
+
+  <!-- SCREEN 2: choose the target column (and an optional date column), then run -->
+  <section class="screen" id="screen-target">
+    <h1>Choose what to predict</h1>
+    <p class="hint">Pick the column you want the model to learn and predict.</p>
+    <div class="file-info" id="file-info"></div>
+
+    <div class="field">
+      <label for="target-select">Target column (required)</label>
+      <p class="note">The column with the answers, for example "churned" or "price".</p>
+      <select id="target-select"></select>
+    </div>
+
+    <div class="field">
+      <label for="date-select">Date or time column (optional)</label>
+      <p class="note">Pick a date column if your data has one. It is removed before training.</p>
+      <select id="date-select"></select>
+    </div>
+
+    <details class="card preview" id="preview-box">
+      <summary><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span class="when-closed">View first 5 sample rows</span><span class="when-open">Hide sample data preview</span><span class="toggle"><span class="when-closed">Expand</span><span class="when-open">Collapse</span></span></summary>
+      <div class="preview-wrap"><table id="preview-table"></table></div>
+    </details>
+
+    <button class="go" id="run-button" disabled>Run analysis</button>
+    <button class="back" id="back-button">&larr; Back to dataset upload</button>
+
+    <!-- shown while the backend works -->
+    <div class="running" id="running-box">
+      <div class="spinner"></div>
+      <div><b>Cleaning the data and training models...</b><br>This can take a minute or two. Please keep this page open.</div>
+    </div>
+    <div class="message" id="target-message"></div>
+  </section>
+
+  <!-- SCREEN 3: results (model table, important columns, full summary, known limitations) -->
+  <section class="screen" id="screen-results">
+    <h1>Analysis complete</h1>
+    <p class="hint" id="results-target-text"></p>
+
+    <!-- best model details box -->
+    <div class="card" id="best-model-box">
+      <h3 id="best-model-title"></h3>
+      <p class="note" id="best-model-desc" style="margin-bottom: 6px;"></p>
+      <p class="note" id="best-model-imbalance" style="margin-bottom: 0; color: var(--main-dark);"></p>
+    </div>
+
+    <!-- table of all models, best model highlighted -->
+    <div class="card">
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px;">
+        <h3>Model Comparison</h3>
+        <p class="note" id="table-note" style="margin-bottom: 0;"></p>
+      </div>
+      <div class="table-wrap"><table id="model-table"></table></div>
+    </div>
+
+    <!-- bars for the most important columns of the best model -->
+    <div class="card" id="features-card">
+      <h3>Most Important Columns</h3>
+      <p class="note">Measured by permutation score drop when shuffling each column across test rows. Higher value indicates stronger reliance by the best model.</p>
+      <div id="feature-bars"></div>
+    </div>
+
+    <!-- open/close boxes -->
+    <details class="card">
+      <summary>Full Pipeline Summary Report</summary>
+      <div class="summary-text" id="summary-text"></div>
+    </details>
+    <details class="card">
+      <summary>Known Limitations & Transparency</summary>
+      <ul id="limit-list"></ul>
+    </details>
+
+    <!-- 3 actions: ask jarvis / chat history, start new analysis, exit -->
+    <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 18px;">
+      <button class="go" id="chat-button" style="margin-top: 0;">Ask Questions & View Chat History (Step 4)</button>
+      <button class="go" id="again-button" style="margin-top: 0; background: var(--card); color: var(--main); border: 2px solid var(--main);">Start a new dataset analysis</button>
+      <button class="back" id="exit-button" style="margin: 0 auto; color: var(--bad);">Exit</button>
+    </div>
+  </section>
+
+  <!-- SCREEN 4: Chat & Analysis Q&A -->
+  <section class="screen" id="screen-chat">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 6px;">
+      <div>
+        <h1 style="margin: 0 0 6px;">Chat &amp; Analysis Q&amp;A</h1>
+        <p class="hint" style="margin: 0;">Ask questions about the dataset, models, cross-validation metrics, or feature importance.</p>
+      </div>
+      <!-- Export and Clear History buttons -->
+      <div class="chat-header-actions">
+        <button type="button" class="btn-outline" id="chat-export-btn" title="Download conversation as text">
+          &#8681; Export
+        </button>
+        <button type="button" class="btn-outline btn-clear" id="chat-clear-btn" title="Clear chat messages">
+          &#128465; Clear History
+        </button>
+      </div>
+    </div>
+
+    <!-- Subheader metadata chip bar -->
+    <div class="chat-info-bar" id="chat-info-bar">
+      <!-- filled dynamically by JS with filename, target, best model, cv score -->
+    </div>
+
+    <!-- Main Chat Container -->
+    <div class="chat-container">
+      <!-- Scrollable Message Stream -->
+      <div class="chat-stream" id="chat-stream">
+        <!-- Messages will be injected here dynamically -->
+      </div>
+
+      <!-- Suggested Questions Chips -->
+      <div class="chat-suggestions">
+        <div class="chat-suggestions-title">&#10024; Suggested questions:</div>
+        <div class="chat-chips-wrap" id="chat-chips-wrap">
+          <button type="button" class="chat-chip">Why was the best model chosen over other models?</button>
+          <button type="button" class="chat-chip">What does the CV standard deviation tell us?</button>
+          <button type="button" class="chat-chip">Explain the feature importance for top features</button>
+          <button type="button" class="chat-chip">Why is balanced accuracy used instead of plain accuracy?</button>
+        </div>
+      </div>
+
+      <!-- Input Row -->
+      <div class="chat-input-bar">
+        <input type="text" id="chat-user-input" placeholder="Ask anything about the models, data, metrics, or limitations..." autocomplete="off">
+        <button type="button" class="btn-send" id="chat-send-btn">Ask</button>
+      </div>
+    </div>
+
+    <!-- Bottom Navigation Actions -->
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px;">
+      <button class="back" id="chat-back-button">&larr; Back to results (Step 3)</button>
+      <button class="back" id="chat-exit-button" style="color: var(--bad);">Exit</button>
+    </div>
+  </section>
+  <!-- SCREEN 5: Ending -->
+  <section class="screen" id="screen-ending">
+    <div style="text-align: center; padding: 40px 10px;">
+      <div style="font-size: 50px; color: var(--main); margin-bottom: 10px;">&#10004;</div>
+      <h2 style="font-size: 24px;">Thank you for using Anlytx AI!</h2>
+      <p class="hint">Your analysis and model evaluation are saved. You've successfully trained models and uncovered actionable insights.</p>
+      
+      <div class="card" style="text-align: left; background: #f4f8fa; border: none;">
+        <p style="margin-top: 0; font-size: 12px; font-weight: 700; color: var(--soft-text);">RUN DETAILS</p>
+        <p style="margin: 8px 0;">&#128196; Dataset: <b id="end-filename"></b></p>
+        <p style="margin: 8px 0;">&#127941; Champion: <b id="end-champion"></b></p>
+        <p style="margin: 8px 0;">&#9201; Session auto-synced</p>
+      </div>
+
+      <button class="go" id="end-new-btn">Start new analysis</button>
+      <button class="go" id="end-download-btn" style="background: var(--card); color: var(--main); border: 2px solid var(--line); margin-top: 10px;">Download Analysis Summary</button>
+    </div>
+  </section>
+</div>
+
+<script>
+  // address of the backend (local test now; put the Horizon address here later)
+  const API_URL = "http://localhost:8000";
+  const MAX_MB = 50;
+
+  // what the page remembers while it is open (later screens use this)
+  const appState = { workingDir: null, columns: [], preview: null, taskType: null, fileName: "", result: null };
+  let chosenFile = null;
+
+  // short names for the page parts we use
+  const dropBox = document.getElementById("drop-box");
+  const fileInput = document.getElementById("file-input");
+  const fileBox = document.getElementById("file-box");
+  const uploadButton = document.getElementById("upload-button");
+  const uploadMessage = document.getElementById("upload-message");
+  const targetSelect = document.getElementById("target-select");
+  const dateSelect = document.getElementById("date-select");
+  const runButton = document.getElementById("run-button");
+  const backButton = document.getElementById("back-button");
+  const runningBox = document.getElementById("running-box");
+  const targetMessage = document.getElementById("target-message");
+
+  // show one screen and color the step bar (stepNumber 1 to 4)
+  function showScreen(screenId, stepNumber) {
+    document.querySelectorAll(".screen").forEach((s) => s.classList.remove("show"));
+    document.getElementById(screenId).classList.add("show");
+    for (let n = 1; n <= 4; n++) {
+      const stepBox = document.getElementById("step-" + n);
+      stepBox.classList.toggle("active", n === stepNumber);
+      stepBox.classList.toggle("done", n < stepNumber);
+    }
+    window.scrollTo(0, 0);
+  }
+
+  // show a message in a message box (kind is "error" or "ok")
+  function showMessage(box, text, kind) {
+    box.textContent = text;
+    box.className = "message " + kind;
+  }
+
+  // ---------- SCREEN 1: upload ---------- //
+
+  // the upload button works only when a file AND a task type are chosen
+  function updateUploadButton() {
+    const taskPicked = document.querySelector('input[name="task"]:checked');
+    uploadButton.disabled = !(chosenFile && taskPicked);
+  }
+
+  // check the chosen file and show its name
+  function takeFile(file) {
+    uploadMessage.className = "message";
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (!["csv", "xlsx", "xls"].includes(ext)) {
+      chosenFile = null;
+      fileBox.style.display = "none";
+      showMessage(uploadMessage, "This file type is not supported. Please choose a .csv, .xlsx or .xls file.", "error");
+    } else if (file.size > MAX_MB * 1024 * 1024) {
+      chosenFile = null;
+      fileBox.style.display = "none";
+      showMessage(uploadMessage, "This file is bigger than " + MAX_MB + " MB. Please choose a smaller file.", "error");
+    } else {
+      chosenFile = file;
+      fileBox.textContent = file.name + " (" + (file.size / 1024 / 1024).toFixed(2) + " MB)";
+      fileBox.style.display = "block";
+    }
+    updateUploadButton();
+  }
+
+  // click or keyboard on the drop box opens the file chooser
+  dropBox.addEventListener("click", () => fileInput.click());
+  dropBox.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") fileInput.click(); });
+  fileInput.addEventListener("change", () => { if (fileInput.files[0]) takeFile(fileInput.files[0]); });
+
+  // drag and drop a file onto the drop box
+  dropBox.addEventListener("dragover", (e) => { e.preventDefault(); dropBox.classList.add("over"); });
+  dropBox.addEventListener("dragleave", () => dropBox.classList.remove("over"));
+  dropBox.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropBox.classList.remove("over");
+    if (e.dataTransfer.files[0]) takeFile(e.dataTransfer.files[0]);
+  });
+
+  // task type: highlight the picked card
+  document.querySelectorAll('input[name="task"]').forEach((radio) => {
+    radio.addEventListener("change", () => {
+      document.querySelectorAll(".choice").forEach((c) => c.classList.remove("picked"));
+      radio.closest(".choice").classList.add("picked");
+      updateUploadButton();
+    });
+  });
+
+  // draw the first 5 rows (cell text is set with textContent, so no file content is ever run as HTML)
+  function fillPreview() {
+    const table = document.getElementById("preview-table");
+    const box = document.getElementById("preview-box");
+    table.innerHTML = "";
+    box.open = false;
+    if (!appState.preview) { box.style.display = "none"; return; }   // older backend: hide the box
+    box.style.display = "";
+    const head = table.createTHead().insertRow();
+    appState.preview.columns.forEach((c) => addCell(head, c, "th"));
+    const body = table.createTBody();
+    appState.preview.rows.forEach((r) => {
+      const tr = body.insertRow();
+      r.forEach((v) => { addCell(tr, v.length > 80 ? v.slice(0, 80) + "..." : v); });
+    });
+  }
+
+  // fill the two dropdowns on the Target screen with the real column names
+  function fillTargetScreen() {
+    fillPreview();
+    document.getElementById("file-info").textContent = appState.fileName + " - " + appState.columns.length + " columns - " + appState.taskType;
+    targetSelect.innerHTML = '<option value="">Choose a column</option>';
+    dateSelect.innerHTML = '<option value="">None</option>';
+    appState.columns.forEach((col) => {
+      targetSelect.add(new Option(col, col));
+      dateSelect.add(new Option(col, col));
+    });
+    runButton.disabled = true;
+    targetMessage.className = "message";
+  }
+
+  // send the file to the backend (/api/processing_data) and move to the Target screen
+  uploadButton.addEventListener("click", async () => {
+    const taskType = document.querySelector('input[name="task"]:checked').value;
+    uploadButton.disabled = true;
+    uploadButton.textContent = "Uploading...";
+    uploadMessage.className = "message";
+    try {
+      const url = API_URL + "/api/processing_data?filename=" + encodeURIComponent(chosenFile.name) + "&task_type=" + taskType;
+      const answer = await fetch(url, { method: "POST", body: chosenFile });
+      const data = await answer.json();
+      if (!answer.ok) {
+        showMessage(uploadMessage, "Upload failed: " + (data.error || "unknown error"), "error");
+      } else {
+        appState.workingDir = data.working_dir;
+        appState.columns = data.columns;
+        appState.preview = data.preview || null;
+        appState.taskType = taskType;
+        appState.fileName = chosenFile.name;
+        fillTargetScreen();
+        showScreen("screen-target", 2);
+      }
+    } catch (err) {
+      showMessage(uploadMessage, "Could not reach the server. Check that it is running at " + API_URL + ".", "error");
+    }
+    uploadButton.textContent = "Upload and continue";
+    updateUploadButton();
+  });
+
+  // ---------- SCREEN 2: target and run ---------- //
+
+  // the run button works only when a target column is chosen
+  targetSelect.addEventListener("change", () => {
+    runButton.disabled = !targetSelect.value;
+    targetMessage.className = "message";
+  });
+
+  // go back to the upload screen
+  backButton.addEventListener("click", () => showScreen("screen-upload", 1));
+
+  // send the choices to the backend (/api/run-pipeline) and wait for the result
+  runButton.addEventListener("click", async () => {
+    // the target column cannot also be the date column
+    if (dateSelect.value && dateSelect.value === targetSelect.value) {
+      showMessage(targetMessage, "The date column and the target column must be different.", "error");
+      return;
+    }
+    // lock the screen while the backend works
+    runButton.disabled = true;
+    targetSelect.disabled = true;
+    dateSelect.disabled = true;
+    backButton.disabled = true;
+    runningBox.classList.add("show");
+    targetMessage.className = "message";
+    try {
+      const answer = await fetch(API_URL + "/api/run-pipeline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          working_dir: appState.workingDir,
+          task_type: appState.taskType,
+          target: targetSelect.value,
+          date_column: dateSelect.value || null,
+        }),
+      });
+      const data = await answer.json();
+      if (!answer.ok) {
+        // the backend sends {"error": "..."}; the user stays here and can change the target
+        showMessage(targetMessage, data.error || "The analysis failed. Try a different target column.", "error");
+      } else {
+        appState.result = data;
+        renderResults(data);
+        showScreen("screen-results", 3);
+      }
+    } catch (err) {
+      showMessage(targetMessage, "Could not reach the server. Check that it is running at " + API_URL + ".", "error");
+    }
+    // unlock the screen again
+    runningBox.classList.remove("show");
+    targetSelect.disabled = false;
+    dateSelect.disabled = false;
+    backButton.disabled = false;
+    runButton.disabled = !targetSelect.value;
+  });
+
+  // ---------- SCREEN 3: results ---------- //
+
+  // small helper: add one cell (td or th) with plain text to a table row
+  function addCell(row, text, tag) {
+    const cell = document.createElement(tag || "td");
+    cell.textContent = text;
+    row.appendChild(cell);
+  }
+
+  // fill the Results screen from the answer of /api/run-pipeline
+  // (text is added with textContent, so column names from the user's file can never run as code)
+  function renderResults(data) {
+    document.getElementById("summary-text").textContent = data.final_summary;
+
+    // training details step inside report.steps
+    const steps = (data.report && data.report.steps) || [];
+    const train = steps.find((s) => s.step === "train_and_evaluate_models");
+    if (!train) {
+      document.getElementById("results-target-text").textContent = "The training details were not found. Open the full summary below.";
+      return;
+    }
+
+    // 1. subtitle with target name
+    document.getElementById("results-target-text").innerHTML = "Automated evaluation finished for predicting <b>" + train.target + "</b>.";
+
+    // 2. best model details
+    const metricName = String(train.metric).replace(/_/g, " ");
+    document.getElementById("best-model-title").textContent = "BEST MODEL SELECTED: " + train.best_model;
+    document.getElementById("best-model-desc").textContent = "Chosen by highest 5-fold cross-validation " + metricName + " on training rows. Tested on strictly unseen validation rows.";
+    
+    const imbBox = document.getElementById("best-model-imbalance");
+    if (train.imbalanced && train.minority_share !== null && train.minority_share !== undefined) {
+      const minorityPct = (train.minority_share * 100).toFixed(1);
+      imbBox.textContent = "Minority class is " + minorityPct + "% of rows. RandomOverSampler used on train folds with balanced accuracy.";
+      imbBox.style.display = "block";
+    } else {
+      imbBox.style.display = "none";
+    }
+
+    // 3. model comparison table header metadata
+    let noteParts = ["Metric: " + metricName];
+    if (train.metric_baseline !== null && train.metric_baseline !== undefined) {
+      noteParts.push("Guessing baseline: " + train.metric_baseline.toFixed(3));
+    }
+    if (train.majority_class_baseline_accuracy !== null && train.majority_class_baseline_accuracy !== undefined) {
+      noteParts.push("Majority guess: " + train.majority_class_baseline_accuracy.toFixed(3));
+    }
+    document.getElementById("table-note").textContent = noteParts.join(" · ");
+
+    // 4. model comparison table rows
+    const table = document.getElementById("model-table");
+    table.innerHTML = "";
+    const headRow = table.insertRow();
+    ["Model", "Train", "Test", "5-Fold CV", "CV Std"].forEach((t) => addCell(headRow, t, "th"));
+    
+    const sorted = [...train.model_results].sort((a, b) => b.cv_score - a.cv_score);
+    sorted.forEach((m) => {
+      const row = table.insertRow();
+      if (m.model_name === train.best_model) row.className = "best";
+      
+      const modelLabel = m.model_name === train.best_model ? m.model_name + " (Best)" : m.model_name;
+      addCell(row, modelLabel);
+      addCell(row, m.train_acc !== null && m.train_acc !== undefined ? m.train_acc.toFixed(3) : "-");
+      addCell(row, m.test_acc !== null && m.test_acc !== undefined ? m.test_acc.toFixed(3) : "-");
+      addCell(row, m.cv_score !== null && m.cv_score !== undefined ? m.cv_score.toFixed(3) : "-");
+      addCell(row, m.cv_std !== null && m.cv_std !== undefined ? "±" + m.cv_std.toFixed(3) : "-");
+    });
+
+    // 5. feature importance bars with 4 decimals and 'score drop' text
+    const bars = document.getElementById("feature-bars");
+    bars.innerHTML = "";
+    const top = train.top_features || [];
+    document.getElementById("features-card").style.display = top.length ? "block" : "none";
+    const biggest = Math.max(...top.map((t) => t.score_drop), 0);
+    top.forEach((t) => {
+      const percent = biggest > 0 ? Math.max(0, t.score_drop) / biggest * 100 : 0;
+      const rowBox = document.createElement("div");
+      rowBox.className = "bar-row";
+      const label = document.createElement("div");
+      label.className = "bar-label";
+      const nameText = document.createElement("span");
+      nameText.textContent = t.feature;
+      const valueText = document.createElement("span");
+      valueText.textContent = t.score_drop.toFixed(4) + " score drop";
+      label.append(nameText, valueText);
+      const track = document.createElement("div");
+      track.className = "bar-track";
+      const fill = document.createElement("div");
+      fill.className = "bar-fill";
+      fill.style.width = percent + "%";
+      track.appendChild(fill);
+      rowBox.append(label, track);
+      bars.appendChild(rowBox);
+    });
+
+    // 6. known limitations list
+    const list = document.getElementById("limit-list");
+    list.innerHTML = "";
+    (train.known_limitations || []).forEach((text) => {
+      const item = document.createElement("li");
+      item.textContent = text;
+      list.appendChild(item);
+    });
+  }
+
+  // ---------- SCREEN 4: chat state and logic ---------- //
+  // stores the chat messages shown on screen
+  let chatConversation = [];
+
+  // helper: format time as HH:MM AM/PM
+  function getShortTime() {
+    const d = new Date();
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // helper: escape HTML tags so dataset values cannot break the page
+  function escapeText(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  // append one message bubble to the chat stream
+  function appendChatMessage(role, text) {
+    const time = getShortTime();
+    chatConversation.push({ role, text, time });
+
+    const stream = document.getElementById("chat-stream");
+    const msgDiv = document.createElement("div");
+    msgDiv.className = "chat-msg " + role;
+
+    const avatar = document.createElement("div");
+    avatar.className = "chat-avatar";
+    avatar.textContent = role === "bot" ? "AI" : "You";
+
+    const contentDiv = document.createElement("div");
+    contentDiv.style.flex = "1";
+
+    const header = document.createElement("div");
+    header.className = "chat-msg-author";
+    header.innerHTML = "<span>" + (role === "bot" ? "Anlytx AI Assistant" : "You") + "</span><span>" + time + "</span>";
+
+    const bubble = document.createElement("div");
+    bubble.className = "chat-bubble";
+    // replace newlines with line breaks and double stars with bold text
+    bubble.innerHTML = escapeText(text)
+      .replace(/\*\*(.*?)\*\*/g, "<b>$1</b>")
+      .replace(/`(.*?)`/g, "<code>$1</code>")
+      .replace(/\n/g, "<br>");
+
+    contentDiv.append(header, bubble);
+    msgDiv.append(avatar, contentDiv);
+    stream.appendChild(msgDiv);
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  // initialize screen 4 when entering chat
+  function setupChatScreen() {
+    const res = appState.result;
+    if (!res) return;
+
+    const steps = (res.report && res.report.steps) || [];
+    const train = steps.find((s) => s.step === "train_and_evaluate_models");
+
+    // 1. fill subheader info bar
+    const infoBar = document.getElementById("chat-info-bar");
+    if (train) {
+      infoBar.innerHTML = "<b>" + escapeText(appState.fileName) + "</b> · Target: <b>" + escapeText(train.target) + "</b> · Best: <b>" + escapeText(train.best_model) + "</b> · 5-Fold CV: <b>" + (train.cv_score ? train.cv_score.toFixed(3) : "-") + "</b>";
+    }
+
+    // 2. build initial welcome message if conversation is empty
+    if (chatConversation.length === 0 && train) {
+      const metric = String(train.metric).replace(/_/g, " ");
+      let welcome = "**Analysis Complete!**\n\n";
+      welcome += "The AutoML pipeline selected **" + train.best_model + "** as the champion model for predicting `" + train.target + "` (" + train.task_type + "), achieving a **" + (train.cv_score ? train.cv_score.toFixed(3) : "-") + "** cross-validation " + metric + " (CV std: " + (train.cv_std ? train.cv_std.toFixed(3) : "0.0") + ").\n\n";
+
+      if (train.imbalanced && train.minority_share) {
+        welcome += "⚠️ **Class Imbalance Detected**: The minority class accounts for only " + (train.minority_share * 100).toFixed(1) + "% of rows. RandomOverSampler was applied exclusively to training rows, and **balanced accuracy** was prioritized.\n\n";
+      }
+
+      if (train.top_features && train.top_features.length > 0) {
+        const top = train.top_features[0];
+        welcome += "🔑 **Primary Driver**: `" + top.feature + "` demonstrated the highest permutation importance on unseen test data (score drop: " + top.score_drop.toFixed(4) + ").\n\n";
+      }
+
+      welcome += "Feel free to ask any question about the models, metrics, data pipeline, or next steps!";
+      appendChatMessage("bot", welcome);
+    }
+  }
+
+  // send question to the chat interface
+  async function sendChatMessage(promptText) {
+    const input = document.getElementById("chat-user-input");
+    const sendBtn = document.getElementById("chat-send-btn");
+    const text = (promptText || input.value).trim();
+    if (!text) return;
+
+    input.value = "";
+    appendChatMessage("user", text);
+
+    // disable input while waiting
+    input.disabled = true;
+    sendBtn.disabled = true;
+
+    try {
+      // call chat backend route (with working_dir and context)
+      const res = await fetch(API_URL + "/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: text,
+          working_dir: appState.workingDir,
+          history: chatConversation.slice(-6)
+        })
+      });
+
+      if (!res.ok) {
+        appendChatMessage("bot", "I am having trouble answering right now. Please try asking again.");
+      } else {
+        const data = await res.json();
+        appendChatMessage("bot", data.answer || data.reply || "Done.");
+      }
+    } catch (err) {
+      appendChatMessage("bot", "Could not reach the chat service. Check backend connection.");
+    }
+
+    input.disabled = false;
+    sendBtn.disabled = false;
+    input.focus();
+  }
+
+  // click send button or press Enter
+  document.getElementById("chat-send-btn").addEventListener("click", () => sendChatMessage());
+  document.getElementById("chat-user-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") sendChatMessage();
+  });
+
+  // suggested questions chips click
+  document.getElementById("chat-chips-wrap").addEventListener("click", (e) => {
+    if (e.target.classList.contains("chat-chip")) {
+      sendChatMessage(e.target.textContent);
+    }
+  });
+
+  // export chat conversation as a downloadable text file
+  document.getElementById("chat-export-btn").addEventListener("click", () => {
+    if (chatConversation.length === 0) return;
+    let exportContent = "Anlytx AI - Chat History\n";
+    exportContent += "Dataset: " + appState.fileName + "\n";
+    exportContent += "Date: " + new Date().toLocaleString() + "\n";
+    exportContent += "========================================\n\n";
+
+    chatConversation.forEach((item) => {
+      exportContent += "[" + item.time + "] " + (item.role === "bot" ? "Assistant" : "User") + ":\n";
+      exportContent += item.text + "\n\n";
+    });
+
+    const blob = new Blob([exportContent], { type: "text/plain" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = (appState.fileName ? appState.fileName.split(".")[0] : "anlytx") + "_chat_history.txt";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  });
+
+  // clear chat history (clears UI messages only; report.json stays safe)
+  document.getElementById("chat-clear-btn").addEventListener("click", () => {
+    chatConversation = [];
+    document.getElementById("chat-stream").innerHTML = "";
+    setupChatScreen();
+  });
+
+  // navigation buttons
+  document.getElementById("chat-button").addEventListener("click", () => {
+    // Redirects to your local n8n Chat Form
+    window.location.href = "http://localhost:5678/form/745caf67-a9d5-4279-8867-19fe6647544a"; 
+  });
+
+  document.getElementById("again-button").addEventListener("click", () => showScreen("screen-upload", 1));
+
+  // prepare the ending screen details (Screen 5)
+  function showEndingScreen() {
+    document.getElementById("end-filename").textContent = appState.fileName || "Dataset";
+    const train = (appState.result?.report?.steps || []).find((s) => s.step === "train_and_evaluate_models");
+    document.getElementById("end-champion").textContent = train ? train.best_model : "-";
+    
+    // hide all screens, show screen 5
+    document.querySelectorAll(".screen").forEach(s => s.classList.remove("show"));
+    document.getElementById("screen-ending").classList.add("show");
+  }
+
+  // exit buttons now go to the Ending Screen instead of Upload
+  document.getElementById("exit-button").addEventListener("click", showEndingScreen);
+  document.getElementById("chat-exit-button").addEventListener("click", showEndingScreen);
+
+  document.getElementById("chat-back-button").addEventListener("click", () => showScreen("screen-results", 3));
+
+  // buttons on the Ending Screen (Screen 5)
+  document.getElementById("end-new-btn").addEventListener("click", () => {
+    window.location.href = window.location.pathname; // Reloads the page clean for a new analysis
+  });
+  
+  document.getElementById("end-download-btn").addEventListener("click", () => {
+    if (!appState.result) return;
+    const blob = new Blob([appState.result.final_summary || JSON.stringify(appState.result.report, null, 2)], { type: "text/plain" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "Anlytx_Summary.txt";
+    link.click();
+  });
+
+  // check if we just came back from n8n (via ?step=ending in the URL)
+  if (window.location.search.includes("step=ending")) {
+    showEndingScreen();
+  } else {
+    // the page starts normally on the upload screen
+    showScreen("screen-upload", 1);
+  }
+
+</script>
+</body>
+</html>

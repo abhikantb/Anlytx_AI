@@ -3,10 +3,9 @@ numpy
 scikit-learn
 matplotlib
 seaborn
-# langgraph
 langchain
 langchain_groq
-ollama
+langchain-openai
 jupyter
 python-dotenv 
 groq

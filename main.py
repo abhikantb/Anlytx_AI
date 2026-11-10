@@ -5,32 +5,52 @@ import pandas as pd
 from dotenv import load_dotenv
 load_dotenv()
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse,Response
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
+
 from fastmcp import FastMCP
 
 mcp = FastMCP("Anlytx_AI")
 
+def allow_browser(handler):
+    async def wrapper(request: Request):
+        if request.method == "OPTIONS":
+            response = Response(status_code=204)   # the browser's question gets an empty "ok"
+        else:
+            response = await handler(request)       # a normal request runs the real route
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return response
+    return wrapper
+
+
+
 from backend.tools.utils import (
     process_and_save_upload, save_step_output, log_step, build_summary, strip_key,
-    inspect_dataset, run_compulsory_steps,
+    inspect_dataset, run_compulsory_steps,reset_working_data
 )
 from backend.tools.preprocessing import drop_datetime_columns, extract_text_sentiment
 
 
 # ------------------- 1. UPLOAD ROUTE ------------------- #
-@mcp.custom_route("/api/processing_data", methods=["POST"])
+@mcp.custom_route("/api/processing_data", methods=["POST","OPTIONS"])
+@allow_browser
 async def processing_data(request: Request):
     try:
         body = await request.body()
         filename = request.query_params["filename"]
         task_type = request.query_params["task_type"]
         working_dir, columns = process_and_save_upload(body, filename)
+        # first 5 rows as text, for the sample-rows box on the page (empty cells stay empty)
+        head = pd.read_csv(os.path.join(working_dir, "working_dataset.csv"), nrows=5, dtype=str, keep_default_na=False)
         return JSONResponse({
             "status": "success",
             "working_dir": working_dir,
             "columns": columns,
+            "preview": {"columns": list(head.columns), "rows": head.values.tolist()},
             "task_type": task_type
         })
     except Exception as e:
@@ -110,7 +130,8 @@ def tool_drop_auto_date_columns(date_cols: List[str], working_dir: str, target: 
         return {"error": f"Failed to drop date columns: {str(e)}"}
 
 # ------------------- 3. MAIN PIPELINE ROUTE ------------------- #
-@mcp.custom_route("/api/run-pipeline", methods=["POST"])
+@mcp.custom_route("/api/run-pipeline", methods=["POST", "OPTIONS"])
+@allow_browser
 async def run_pipeline(request: Request):
     try:
         body2 = await request.json()
@@ -118,6 +139,8 @@ async def run_pipeline(request: Request):
         task_type = body2["task_type"]
         target = body2["target"]
         date_column = body2.get("date_column")
+
+        reset_working_data(working_dir)
 
         # Step 0: drop the date/time column chosen by the user (preprocessing function does the work)
         df = pd.read_csv(os.path.join(working_dir, "working_dataset.csv"))
@@ -213,6 +236,89 @@ async def run_pipeline(request: Request):
         })
     except Exception as e:
         return JSONResponse({"error": f"Pipeline execution failed: {str(e)}"}, status_code=500)
+
+# ------------------- 4. CHAT ROUTE ------------------- #
+# chat with Jarvis using free OpenRouter models to save Groq limits
+@mcp.custom_route("/api/chat", methods=["POST", "OPTIONS"])
+@allow_browser
+async def chat_handler(request: Request):
+    try:
+        data = await request.json()
+        question = data.get("question", "").strip()
+        working_dir = data.get("working_dir")
+        history = data.get("history", [])
+
+        if not question:
+            return JSONResponse({"answer": "Please ask a question about your dataset or analysis."})
+
+        # read summary report if available to ground the AI answers
+        summary_text = ""
+        report_path = os.path.join(working_dir, "report.json") if working_dir else ""
+        if report_path and os.path.exists(report_path):
+            with open(report_path, "r") as f:
+                report_data = json.load(f)
+            summary_text = build_summary(report_data)
+
+        # system instructions: plain explanation, ground on report, keep it brief
+        system_rules = (
+            "You are Jarvis, an expert and friendly AutoML assistant for Anlytx AI.\n"
+            "Your role is to answer questions strictly about the dataset, models trained, cross-validation metrics, "
+            "feature importance, and known limitations from the report provided.\n"
+            "Rules:\n"
+            "1. Explain in simple, clear terms without hardcoding.\n"
+            "2. Keep answers concise and direct.\n"
+            "3. If the question asks why a metric or model was picked, cite facts from the summary.\n"
+            "4. If something is unknown or not in the report, admit it plainly."
+        )
+
+        messages = [SystemMessage(content=system_rules)]
+
+        if summary_text:
+            messages.append(SystemMessage(content=f"Current Pipeline Run Summary:\n{summary_text}"))
+
+        # append conversation memory from the browser
+        for msg in history:
+            role = msg.get("role")
+            text = msg.get("text", "")
+            if role == "user":
+                messages.append(HumanMessage(content=text))
+            elif role == "bot":
+                messages.append(SystemMessage(content=f"Assistant: {text}"))
+
+        messages.append(HumanMessage(content=question))
+
+        # Free OpenRouter models for chat (zero Groq token usage)
+        openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        base_url = "https://openrouter.ai/api/v1"
+
+        primary = ChatOpenAI(
+            model="nvidia/nemotron-3-ultra:free",
+            openai_api_base=base_url,
+            openai_api_key=openrouter_key,
+            temperature=0.2,
+        ).with_retry(stop_after_attempt=2)
+
+        backup1 = ChatOpenAI(
+            model="nvidia/nemotron-3.5-lightning:free",
+            openai_api_base=base_url,
+            openai_api_key=openrouter_key,
+            temperature=0.2,
+        ).with_retry(stop_after_attempt=2)
+
+        backup2 = ChatOpenAI(
+            model="cohere/north-mini-code:free",
+            openai_api_base=base_url,
+            openai_api_key=openrouter_key,
+            temperature=0.2,
+        ).with_retry(stop_after_attempt=2)
+
+        llm = primary.with_fallbacks([backup1, backup2])
+
+        ai_response = llm.invoke(messages)
+        return JSONResponse({"status": "success", "answer": ai_response.content})
+
+    except Exception as e:
+        return JSONResponse({"answer": f"Sorry, I ran into an error while processing: {str(e)}"}, status_code=500)
 
 
 if __name__ == "__main__":

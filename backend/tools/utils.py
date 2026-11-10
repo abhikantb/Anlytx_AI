@@ -43,6 +43,7 @@ def process_and_save_upload(body_bytes: bytes, filename: str) -> tuple[str, list
         df = pd.read_excel(io.BytesIO(body_bytes))
     working_dir = create_working_dir(filename)
     save_step_output(df, working_dir, "working_dataset.csv")
+    save_step_output(df, working_dir, "original_dataset.csv")
     return working_dir, list(df.columns)
 
 def log_step(working_dir: str, step: str, details: dict) -> dict:
@@ -330,3 +331,14 @@ def run_compulsory_steps(working_dir: str, target: str, task_type: str) -> None:
     run_categorical(working_dir, target)
     run_numeric(working_dir, target, task_type)
     run_training(working_dir, target, task_type)
+
+def reset_working_data(working_dir: str) -> None:
+    """Starts every run fresh: puts the untouched upload back and deletes the old report."""
+    # put the original data back as the working copy (undo changes from an earlier failed run)
+    original_path = os.path.join(working_dir, "original_dataset.csv")
+    if os.path.exists(original_path):
+        save_step_output(pd.read_csv(original_path), working_dir)
+    # delete the old report, so steps from an earlier run are not mixed in
+    report_path = os.path.join(working_dir, "report.json")
+    if os.path.exists(report_path):
+        os.remove(report_path)
